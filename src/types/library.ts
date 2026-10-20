@@ -95,6 +95,30 @@ export interface RecentItem {
   completed: boolean;
 }
 
+export interface PlayerRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PlayerState {
+  episodeId: number;
+  positionMs: number;
+  durationMs: number;
+  paused: boolean;
+  volume: number;
+  muted: boolean;
+  speed: number;
+  ended: boolean;
+}
+
+export interface PlayerStarted {
+  episodeId: number;
+  durationMs: number;
+  startPositionMs: number;
+}
+
 export interface MediaStats {
   pending: number;
   processing: number;

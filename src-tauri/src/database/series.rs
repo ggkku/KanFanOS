@@ -1,5 +1,5 @@
-use anyhow::Result;
-use rusqlite::params;
+use anyhow::{Context, Result};
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::catalog::schedule_sort_key;
@@ -219,6 +219,17 @@ impl Database {
             categories.push(row?);
         }
         Ok(categories)
+    }
+
+    pub fn get_series(&self, id: i64) -> Result<SeriesSummary> {
+        let conn = self.conn()?;
+        conn.query_row(
+            &format!("{SERIES_SELECT} WHERE s.id = ?1"),
+            [id],
+            map_series,
+        )
+        .optional()?
+        .with_context(|| format!("番剧不存在: id={id}"))
     }
 
     /// 分页返回一个档期下的番剧。

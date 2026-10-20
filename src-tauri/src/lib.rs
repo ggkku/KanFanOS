@@ -47,6 +47,8 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
         scan: ScanState::new(),
         media: MediaState::new(),
         watcher: std::sync::Mutex::new(None),
+        player: std::sync::Mutex::new(None),
+        video_surface: std::sync::Mutex::new(None),
         data_root: root,
     });
 
@@ -97,12 +99,22 @@ pub fn run() {
             commands::cache::clear_thumbnail_cache,
             commands::catalog::list_categories,
             commands::catalog::list_series,
+            commands::catalog::get_series,
             commands::catalog::search_series,
             commands::catalog::list_episodes,
             commands::media::start_media_processing,
             commands::media::cancel_media_processing,
             commands::media::get_media_stats,
-            commands::playback::open_episode,
+            commands::playback::start_player,
+            commands::playback::stop_player,
+            commands::playback::resize_player,
+            commands::playback::player_set_paused,
+            commands::playback::player_seek,
+            commands::playback::player_set_volume,
+            commands::playback::player_set_muted,
+            commands::playback::player_set_speed,
+            commands::playback::player_toggle_subtitles,
+            commands::playback::set_player_fullscreen,
             commands::playback::list_recent,
         ])
         .run(tauri::generate_context!())

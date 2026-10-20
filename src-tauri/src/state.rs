@@ -6,7 +6,11 @@ use std::{
     },
 };
 
-use crate::{database::Database, watcher::WatcherHandle};
+use crate::{
+    database::Database,
+    playback::PlayerSession,
+    watcher::WatcherHandle,
+};
 
 /// 后台任务的运行与取消标记。扫描和媒体处理各自持有一份。
 pub struct TaskState {
@@ -55,6 +59,10 @@ pub struct AppState {
     pub media: MediaState,
     /// 当前番剧目录的文件监听器。
     pub watcher: Mutex<Option<WatcherHandle>>,
+    /// 当前内嵌播放器会话。
+    pub player: Mutex<Option<PlayerSession>>,
+    /// 播放器渲染用的 Win32 子窗口 HWND。
+    pub video_surface: Mutex<Option<isize>>,
     /// 应用数据根目录（`%LOCALAPPDATA%\KanFanOS`）。
     pub data_root: PathBuf,
 }

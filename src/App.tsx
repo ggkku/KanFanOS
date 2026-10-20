@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { AppShell } from "./components/layout/AppShell";
 import { MediaBanner } from "./components/media/MediaBanner";
+import { PlayerDrawer } from "./components/player/PlayerDrawer";
 import { ScanBanner } from "./components/scan/ScanBanner";
 import { SeriesDetail } from "./components/series/SeriesDetail";
 import { SetupScreen } from "./components/setup/SetupScreen";
@@ -16,6 +17,7 @@ import {
   cancelMediaProcessing,
   cancelScan,
   getMediaStats,
+  getSeries,
   getSettings,
   listCategories,
   listEpisodes,
@@ -24,13 +26,13 @@ import {
   onLibrarySync,
   onMediaProgress,
   onScanProgress,
-  playEpisode,
   scanLibrary,
   searchSeries,
   setLibraryRoot,
   startMediaProcessing,
 } from "./api/library";
 import { errorMessage } from "./lib/errors";
+import { sortEpisodes } from "./lib/episodes";
 import { seriesCoverUrl } from "./lib/thumbnails";
 import type {
   AppSettings,
@@ -63,6 +65,11 @@ function App() {
   const [recentItems, setRecentItems] = useState<RecentItem[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
   const [recentVersion, setRecentVersion] = useState(0);
+  const [playerTarget, setPlayerTarget] = useState<{
+    series: SeriesSummary;
+    episodes: EpisodeSummary[];
+    episode: EpisodeSummary;
+  } | null>(null);
   const [selectedSeries, setSelectedSeries] = useState<SeriesSummary | null>(
     null,
   );
@@ -498,12 +505,7 @@ function App() {
     setSelectedSeries(target);
     try {
       const rows = await listEpisodes(target.id);
-      const collator = new Intl.Collator("zh-CN", {
-        numeric: true,
-        sensitivity: "base",
-      });
-      rows.sort((a, b) => collator.compare(a.filename, b.filename));
-      setEpisodes(rows);
+      setEpisodes(sortEpisodes(rows));
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -525,12 +527,50 @@ function App() {
     }
   };
 
-  const play = async (episodeId: number) => {
+  const openPlayer = (
+    series: SeriesSummary,
+    list: EpisodeSummary[],
+    episode: EpisodeSummary,
+  ) => {
+    setPlayerTarget({ series, episodes: list, episode });
+  };
+
+  const playRecent = async (item: RecentItem) => {
+    if (item.seriesId == null) {
+      setError("该视频没有关联番剧");
+      return;
+    }
+
     try {
-      await playEpisode(episodeId);
-      setRecentVersion((value) => value + 1);
+      const [series, rows] = await Promise.all([
+        getSeries(item.seriesId),
+        listEpisodes(item.seriesId),
+      ]);
+      const sorted = sortEpisodes(rows);
+      const episode = sorted.find((row) => row.id === item.videoId);
+
+      if (!episode) {
+        setError("找不到该剧集");
+        return;
+      }
+
+      openPlayer(series, sorted, episode);
     } catch (err) {
       setError(errorMessage(err));
+    }
+  };
+
+  const closePlayer = () => {
+    setPlayerTarget(null);
+    setRecentVersion((value) => value + 1);
+    setRefreshKey((value) => value + 1);
+
+    if (selectedSeries) {
+      void listEpisodes(selectedSeries.id)
+        .then((rows) => setEpisodes(sortEpisodes(rows)))
+        .catch(() => {
+          // 刷新失败不影响关闭播放器。
+        });
     }
   };
 
@@ -552,7 +592,11 @@ function App() {
           setSelectedSeries(null);
           setEpisodes([]);
         }}
-        onPlay={(episode) => void play(episode.id)}
+        onPlay={(episode) => {
+          if (selectedSeries) {
+            openPlayer(selectedSeries, episodes, episode);
+          }
+        }}
       />
     );
   } else if (settings?.libraryRoot == null) {
@@ -587,7 +631,7 @@ function App() {
         items={recentItems}
         loading={recentLoading}
         dataRoot={settings?.dataRoot ?? null}
-        onPlay={(videoId) => void play(videoId)}
+        onPlay={(item) => void playRecent(item)}
         onRefresh={() => setRecentVersion((value) => value + 1)}
       />
     );
@@ -614,15 +658,16 @@ function App() {
   }
 
   return (
-    <AppShell
-      view={view}
-      categories={categories}
-      scanning={scanning}
-      syncing={syncing}
-      query={query}
-      onQueryChange={handleQueryChange}
-      onNavigate={navigate}
-    >
+    <>
+      <AppShell
+        view={view}
+        categories={categories}
+        scanning={scanning}
+        syncing={syncing}
+        query={query}
+        onQueryChange={handleQueryChange}
+        onNavigate={navigate}
+      >
       {progress && <ScanBanner progress={progress} onCancel={() => void handleCancelScan()} />}
 
       {mediaProgress && (
@@ -650,8 +695,24 @@ function App() {
         </div>
       )}
 
-      {content}
-    </AppShell>
+        {content}
+      </AppShell>
+
+      {playerTarget && (
+        <PlayerDrawer
+          series={playerTarget.series}
+          episodes={playerTarget.episodes}
+          episode={playerTarget.episode}
+          dataRoot={settings?.dataRoot ?? null}
+          onClose={closePlayer}
+          onSelectEpisode={(nextEpisode) => {
+            setPlayerTarget((current) =>
+              current ? { ...current, episode: nextEpisode } : current,
+            );
+          }}
+        />
+      )}
+    </>
   );
 }
 

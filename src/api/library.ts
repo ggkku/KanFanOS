@@ -11,12 +11,16 @@ import type {
   LibrarySummary,
   MediaProgress,
   MediaStats,
+  PlayerRect,
+  PlayerStarted,
+  PlayerState,
   RecentItem,
   ScanProgress,
   ScanSummary,
   SearchPage,
   SeriesPage,
   SeriesSort,
+  SeriesSummary,
   SyncEvent,
 } from "../types/library";
 
@@ -124,8 +128,67 @@ export function onMediaProgress(
   );
 }
 
-export function playEpisode(episodeId: number): Promise<void> {
-  return invoke<void>("open_episode", { episodeId });
+export function getSeries(seriesId: number): Promise<SeriesSummary> {
+  return invoke<SeriesSummary>("get_series", { seriesId });
+}
+
+export function startPlayer(
+  episodeId: number,
+  rect: PlayerRect,
+): Promise<PlayerStarted> {
+  return invoke<PlayerStarted>("start_player", { episodeId, rect });
+}
+
+export function stopPlayer(): Promise<void> {
+  return invoke<void>("stop_player");
+}
+
+export function resizePlayer(rect: PlayerRect): Promise<void> {
+  return invoke<void>("resize_player", { rect });
+}
+
+export function playerSetPaused(paused: boolean): Promise<void> {
+  return invoke<void>("player_set_paused", { paused });
+}
+
+export function playerSeek(positionMs: number): Promise<void> {
+  return invoke<void>("player_seek", { positionMs });
+}
+
+export function playerSetVolume(volume: number): Promise<void> {
+  return invoke<void>("player_set_volume", { volume });
+}
+
+export function playerSetMuted(muted: boolean): Promise<void> {
+  return invoke<void>("player_set_muted", { muted });
+}
+
+export function playerSetSpeed(speed: number): Promise<void> {
+  return invoke<void>("player_set_speed", { speed });
+}
+
+export function playerToggleSubtitles(): Promise<void> {
+  return invoke<void>("player_toggle_subtitles");
+}
+
+export function setPlayerFullscreen(fullscreen: boolean): Promise<void> {
+  return invoke<void>("set_player_fullscreen", { fullscreen });
+}
+
+export function onPlayerState(
+  handler: (state: PlayerState) => void,
+): Promise<UnlistenFn> {
+  return listen<PlayerState>("player-state", (event) =>
+    handler(event.payload),
+  );
+}
+
+export function onPlayerClosed(
+  handler: (episodeId: number) => void,
+): Promise<UnlistenFn> {
+  return listen<number>("player-closed", (event) =>
+    handler(event.payload),
+  );
 }
 
 export function listRecent(

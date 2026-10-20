@@ -7,7 +7,7 @@ interface RecentPageProps {
   items: RecentItem[];
   loading: boolean;
   dataRoot: string | null;
-  onPlay: (videoId: number) => void;
+  onPlay: (item: RecentItem) => void;
   onRefresh: () => void;
 }
 
@@ -127,7 +127,7 @@ export function RecentPage({
                   </span>
                   <button
                     type="button"
-                    onClick={() => onPlay(item.videoId)}
+                    onClick={() => onPlay(item)}
                     className="flex items-center gap-1.5 rounded-lg bg-neutral-800 px-2.5 py-1.5 text-[11px] text-neutral-200 transition-colors hover:bg-indigo-600 hover:text-white"
                   >
                     <Play size={11} fill="currentColor" />

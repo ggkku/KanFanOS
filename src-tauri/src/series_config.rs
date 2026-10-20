@@ -82,7 +82,8 @@ fn load_or_create(series_dir: &Path, folder_name: &str) -> SeriesConfig {
              # 搜索别名，可以写多个，例如 [\"英文名\", \"简称\"]\n\
              aliases = []\n\
              \n\
-             # 封面图片，相对本文件夹的路径；留空时自动查找 cover/poster 图片\n\
+             # 封面图片，相对本文件夹的路径；留空时自动查找 cover/poster 图片，\n\
+             # 找不到就使用文件夹内排序最靠前的一张图片\n\
              cover = \"\"\n",
             escape_toml(folder_name)
         );
@@ -128,7 +129,38 @@ fn resolve_cover(series_dir: &Path, configured: &str) -> Option<String> {
         }
     }
 
-    None
+    // 没有约定名称时，使用文件夹内排序最靠前的一张图片。
+    first_image(series_dir)
+}
+
+fn first_image(dir: &Path) -> Option<String> {
+    let mut images: Vec<_> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .map(|extension| {
+                    IMAGE_EXTENSIONS
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    images.sort_by_key(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+
+    images
+        .into_iter()
+        .next()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn cover_version(path: &Path) -> Option<i64> {
@@ -209,6 +241,20 @@ mod tests {
         let resolved = resolve(&dir, "文件夹名");
         assert_eq!(resolved.name, "文件夹名");
         assert!(resolved.cover_path.as_deref().unwrap().ends_with("poster.jpg"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn falls_back_to_first_image() {
+        let dir = temp_series("first-image");
+        fs::write(dir.join(CONFIG_FILE), "name = \"\"\n").unwrap();
+        fs::write(dir.join("b.jpg"), b"fake").unwrap();
+        fs::write(dir.join("a.png"), b"fake").unwrap();
+        fs::write(dir.join("notes.txt"), b"not an image").unwrap();
+
+        let resolved = resolve(&dir, "文件夹名");
+        assert!(resolved.cover_path.as_deref().unwrap().ends_with("a.png"));
 
         let _ = fs::remove_dir_all(dir);
     }

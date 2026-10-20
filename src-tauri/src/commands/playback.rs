@@ -1,18 +1,19 @@
 use std::path::Path;
 
-use tauri::{AppHandle, State};
+use serde_json::json;
+use tauri::{AppHandle, Manager, State};
 
 use crate::database::history::RecentItem;
-use crate::playback::mpv;
+use crate::playback::{self, PlayerRect, PlayerStarted};
 use crate::state::AppState;
-use crate::time::now_ms;
 
-#[tauri::command]
-pub fn open_episode(
+#[tauri::command(async)]
+pub fn start_player(
     app: AppHandle,
-    state: State<'_, AppState>,
     episode_id: i64,
-) -> Result<(), String> {
+    rect: PlayerRect,
+) -> Result<PlayerStarted, String> {
+    let state = app.state::<AppState>();
     let episode = state
         .db
         .playable_episode(episode_id)
@@ -22,21 +23,104 @@ pub fn open_episode(
         return Err(format!("文件不存在：{}", episode.path));
     }
 
-    let (last_position, completed) =
-        state.db.resume_position(episode_id).map_err(to_message)?;
+    playback::start(&app, &episode, episode_id, rect).map_err(to_message)
+}
 
-    // 看完过就从头播放，否则从上次位置继续。
-    let start_ms = if completed { 0 } else { last_position };
-    let pipe = mpv::pipe_name(episode_id);
+#[tauri::command]
+pub fn stop_player(app: AppHandle) {
+    playback::stop(&app);
+}
 
-    mpv::spawn(&episode.path, start_ms, &pipe).map_err(to_message)?;
-    state
-        .db
-        .record_episode_opened(episode_id, now_ms())
-        .map_err(to_message)?;
-    mpv::track_progress(app, episode_id, episode.duration_ms, pipe);
+#[tauri::command]
+pub fn resize_player(
+    app: AppHandle,
+    rect: PlayerRect,
+) -> Result<(), String> {
+    playback::resize(&app, rect).map_err(to_message)
+}
 
-    Ok(())
+#[tauri::command]
+pub fn player_set_paused(
+    app: AppHandle,
+    paused: bool,
+) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "pause", paused] }),
+    )
+    .map_err(to_message)
+}
+
+#[tauri::command]
+pub fn player_seek(
+    app: AppHandle,
+    position_ms: i64,
+) -> Result<(), String> {
+    let seconds = position_ms.max(0) as f64 / 1000.0;
+    playback::send(
+        &app,
+        json!({ "command": ["seek", seconds, "absolute"] }),
+    )
+    .map_err(to_message)
+}
+
+#[tauri::command]
+pub fn player_set_volume(
+    app: AppHandle,
+    volume: f64,
+) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "volume", volume.clamp(0.0, 100.0)] }),
+    )
+    .map_err(to_message)
+}
+
+#[tauri::command]
+pub fn player_set_muted(
+    app: AppHandle,
+    muted: bool,
+) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "mute", muted] }),
+    )
+    .map_err(to_message)
+}
+
+#[tauri::command]
+pub fn player_set_speed(
+    app: AppHandle,
+    speed: f64,
+) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "speed", speed.clamp(0.25, 4.0)] }),
+    )
+    .map_err(to_message)
+}
+
+#[tauri::command]
+pub fn set_player_fullscreen(
+    app: AppHandle,
+    fullscreen: bool,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+
+    window
+        .set_fullscreen(fullscreen)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn player_toggle_subtitles(app: AppHandle) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["cycle", "sub-visibility"] }),
+    )
+    .map_err(to_message)
 }
 
 #[tauri::command]

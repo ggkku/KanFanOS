@@ -280,6 +280,8 @@ mod tests {
             scan: TaskState::new(),
             media: TaskState::new(),
             watcher: std::sync::Mutex::new(None),
+            player: std::sync::Mutex::new(None),
+            video_surface: std::sync::Mutex::new(None),
             data_root: work.join("appdata"),
         };
 

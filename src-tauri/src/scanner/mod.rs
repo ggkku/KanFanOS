@@ -503,6 +503,8 @@ mod tests {
                 scan: ScanState::new(),
                 media: crate::state::MediaState::new(),
                 watcher: std::sync::Mutex::new(None),
+                player: std::sync::Mutex::new(None),
+                video_surface: std::sync::Mutex::new(None),
                 data_root: root.join("appdata"),
             },
             library.id,
@@ -701,6 +703,8 @@ mod tests {
             scan: ScanState::new(),
             media: crate::state::MediaState::new(),
             watcher: std::sync::Mutex::new(None),
+            player: std::sync::Mutex::new(None),
+            video_surface: std::sync::Mutex::new(None),
             data_root: work.join("appdata"),
         };
 

@@ -1,7 +1,7 @@
 use tauri::State;
 
 use crate::database::series::{
-    CategorySummary, EpisodeSummary, SearchPage, SeriesPage,
+    CategorySummary, EpisodeSummary, SearchPage, SeriesPage, SeriesSummary,
 };
 use crate::state::AppState;
 
@@ -28,6 +28,17 @@ pub fn list_series(
     state
         .db
         .list_series_page(library_id, &category, &sort, limit, offset)
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub fn get_series(
+    state: State<'_, AppState>,
+    series_id: i64,
+) -> Result<SeriesSummary, String> {
+    state
+        .db
+        .get_series(series_id)
         .map_err(|error| format!("{error:#}"))
 }
 
