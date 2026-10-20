@@ -55,9 +55,10 @@ export function SeriesDetail({
       <header className="flex items-start gap-5">
         {coverUrl && (
           <img
+            data-series-cover
             src={coverUrl}
             alt=""
-            className="h-40 w-28 shrink-0 rounded-lg border border-neutral-800 object-cover"
+            className="h-40 w-30 shrink-0 rounded-lg border border-neutral-800 object-cover"
           />
         )}
 
@@ -175,10 +176,6 @@ export function SeriesDetail({
           })
         )}
       </section>
-
-      <p className="text-xs text-neutral-600">
-        播放功能将在后续步骤接入；当前列表中的信息来自本地索引与 FFprobe。
-      </p>
     </div>
   );
 }

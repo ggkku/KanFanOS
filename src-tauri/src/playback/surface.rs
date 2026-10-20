@@ -115,3 +115,4 @@ pub fn hide(hwnd: isize) {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }
+

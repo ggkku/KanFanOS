@@ -3,7 +3,10 @@
 pub mod mpv;
 pub mod surface;
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,8 @@ use crate::{database::history::PlayableEpisode, state::AppState, time::now_ms};
 pub const STATE_EVENT: &str = "player-state";
 pub const CLOSED_EVENT: &str = "player-closed";
 pub const ERROR_EVENT: &str = "player-error";
+/// 鼠标移动通知。原生视频窗口会吞掉网页的 mousemove，只能从系统层面轮询光标。
+pub const MOUSE_EVENT: &str = "player-mouse-activity";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +42,14 @@ pub struct PlayerRect {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SubtitleTrack {
+    pub id: i64,
+    pub title: String,
+    pub lang: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlayerState {
     pub episode_id: i64,
     pub position_ms: i64,
@@ -46,6 +59,12 @@ pub struct PlayerState {
     pub muted: bool,
     pub speed: f64,
     pub ended: bool,
+    /// 字幕是否有字幕轨可选。
+    pub subtitles: Vec<SubtitleTrack>,
+    /// 当前字幕轨；`None` 表示字幕关闭。
+    pub subtitle_id: Option<i64>,
+    /// 字幕总开关（`sub-visibility`）。
+    pub subtitles_visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +136,7 @@ pub fn start(
     state.db.record_episode_opened(episode_id, now_ms())?;
 
     spawn_worker(app.clone(), episode_id, episode.duration_ms, pipe, rx);
+    spawn_mouse_watcher(app.clone());
 
     Ok(PlayerStarted {
         episode_id,
@@ -155,6 +175,23 @@ pub fn resize(app: &AppHandle, rect: PlayerRect) -> Result<()> {
     Ok(())
 }
 
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// 隐藏/显示鼠标指针。全屏收起控制栏时一并隐藏，和常见播放器一致。
+pub fn set_cursor_visible(app: &AppHandle, visible: bool) -> Result<()> {
+    if CURSOR_HIDDEN.load(Ordering::SeqCst) == !visible {
+        return Ok(());
+    }
+    CURSOR_HIDDEN.store(!visible, Ordering::SeqCst);
+
+    // ShowCursor 维护的是线程内的显示计数，放在主线程调用。
+    app.run_on_main_thread(move || unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::ShowCursor(visible);
+    })?;
+
+    Ok(())
+}
+
 pub fn send(app: &AppHandle, command: serde_json::Value) -> Result<()> {
     let state = app.state::<AppState>();
     let guard = state
@@ -183,27 +220,16 @@ fn stop_session(app: &AppHandle) {
         return;
     };
 
-    let _ = session
-        .tx
-        .send(r#"{"command":["quit"]}"#.to_string());
     surface::hide(session.surface);
 
+    // 直接结束进程，而不是先发送 quit。
+    //
+    // mpv 处理 quit 后还要走完整的退出流程（实测 1~3 秒），这期间音频仍在输出，
+    // 表现为关闭播放器后还能听到声音。关闭时没有需要 mpv 落盘的状态，直接结束
+    // 进程可以让音频立即停止；观看进度由后台 worker 在管道关闭后写入。
     let PlayerSession { mut child, .. } = session;
-    let started = Instant::now();
-
-    // 同步等待旧进程退出，避免重新播放时新旧 mpv 同时占用同一个窗口句柄。
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > Duration::from_secs(2) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(30)),
-            Err(_) => break,
-        }
-    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn scaled_rect(app: &AppHandle, rect: PlayerRect) -> Result<(i32, i32, i32, i32)> {
@@ -285,6 +311,9 @@ fn observe_commands() -> Vec<String> {
         (5, "mute"),
         (6, "speed"),
         (7, "eof-reached"),
+        (8, "track-list"),
+        (9, "sub-visibility"),
+        (10, "sid"),
     ]
     .iter()
     .map(|(id, property)| {
@@ -294,6 +323,44 @@ fn observe_commands() -> Vec<String> {
         .to_string()
     })
     .collect()
+}
+
+/// 播放期间轮询全局光标位置，移动时通知前端。
+///
+/// 网页只能收到控制栏等 HTML 区域的鼠标事件，光标移到原生视频窗口上时
+/// 事件会被 mpv 吃掉，所以全屏唤出控制栏必须从系统层面检测。
+fn spawn_mouse_watcher(app: AppHandle) {
+    std::thread::spawn(move || {
+        use windows::Win32::{
+            Foundation::POINT,
+            UI::WindowsAndMessaging::GetCursorPos,
+        };
+
+        let mut last = None;
+
+        loop {
+            let playing = app
+                .state::<AppState>()
+                .player
+                .lock()
+                .map(|guard| guard.is_some())
+                .unwrap_or(false);
+            if !playing {
+                break;
+            }
+
+            let mut point = POINT::default();
+            if unsafe { GetCursorPos(&mut point) }.is_ok() {
+                let position = (point.x, point.y);
+                if last != Some(position) {
+                    last = Some(position);
+                    let _ = app.emit(MOUSE_EVENT, ());
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(80));
+        }
+    });
 }
 
 fn spawn_worker(
@@ -373,6 +440,9 @@ async fn worker(
         muted: false,
         speed: 1.0,
         ended: false,
+        subtitles: Vec::new(),
+        subtitle_id: None,
+        subtitles_visible: true,
     };
 
     let mut last_emit = Instant::now();
@@ -441,6 +511,23 @@ async fn worker(
                     immediate = true;
                 }
             }
+            Some(8) => {
+                if let Some(tracks) = data {
+                    state.subtitles = parse_subtitle_tracks(tracks);
+                    immediate = true;
+                }
+            }
+            Some(9) => {
+                if let Some(visible) = data.and_then(|item| item.as_bool()) {
+                    state.subtitles_visible = visible;
+                    immediate = true;
+                }
+            }
+            Some(10) => {
+                // 字幕关闭时 mpv 返回 false，而不是数字。
+                state.subtitle_id = data.and_then(|item| item.as_i64());
+                immediate = true;
+            }
             _ => {}
         }
 
@@ -461,6 +548,39 @@ async fn worker(
 
     cleanup(app, episode_id);
     Ok(())
+}
+
+/// 从 mpv 的 `track-list` 响应中筛出字幕轨。
+fn parse_subtitle_tracks(data: &serde_json::Value) -> Vec<SubtitleTrack> {
+    let Some(tracks) = data.as_array() else {
+        return Vec::new();
+    };
+
+    tracks
+        .iter()
+        .filter(|track| {
+            // mpv 的 track-list 里字幕类型是 "sub"（部分版本写作 "subtitle"）。
+            matches!(
+                track.get("type").and_then(|item| item.as_str()),
+                Some("sub" | "subtitle")
+            )
+        })
+        .filter_map(|track| {
+            Some(SubtitleTrack {
+                id: track.get("id")?.as_i64()?,
+                title: track
+                    .get("title")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                lang: track
+                    .get("lang")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 fn save_progress(app: &AppHandle, episode_id: i64, state: &PlayerState) {
@@ -496,4 +616,40 @@ fn cleanup(app: &AppHandle, episode_id: i64) {
     }
 
     let _ = app.emit(CLOSED_EVENT, episode_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_subtitle_tracks;
+
+    #[test]
+    fn parses_subtitle_tracks_only() {
+        let data = serde_json::json!([
+            {"id": 1, "type": "video", "codec": "hevc"},
+            {"id": 2, "type": "audio", "lang": "ja"},
+            {"id": 1, "type": "sub", "title": "CHS_JP", "lang": "zh-Hans"},
+            {"id": 2, "type": "sub", "title": "CHT_JP", "lang": "zh-Hant"},
+        ]);
+
+        let tracks = parse_subtitle_tracks(&data);
+
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].id, 1);
+        assert_eq!(tracks[0].title, "CHS_JP");
+        assert_eq!(tracks[0].lang, "zh-Hans");
+        assert_eq!(tracks[1].id, 2);
+    }
+
+    #[test]
+    fn tolerates_empty_and_missing_fields() {
+        let empty = parse_subtitle_tracks(&serde_json::json!([]));
+        assert!(empty.is_empty());
+
+        let unnamed = parse_subtitle_tracks(&serde_json::json!([
+            {"id": 7, "type": "subtitle"},
+        ]));
+        assert_eq!(unnamed.len(), 1);
+        assert_eq!(unnamed[0].title, "");
+        assert_eq!(unnamed[0].lang, "");
+    }
 }

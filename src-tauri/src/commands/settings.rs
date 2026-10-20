@@ -19,6 +19,12 @@ pub struct AppSettings {
     pub data_root: String,
     pub auto_watch: bool,
     pub thumbnail_width: u32,
+    /// 页面切换动画：`fade` 或 `slide`。
+    pub page_transition: String,
+    /// 打开番剧时的过渡动画：`rise` / `zoom` / `slide` / `flip`。
+    pub series_transition: String,
+    /// 主窗口模式：`windowed` / `borderless`。
+    pub window_mode: String,
 }
 
 #[tauri::command]
@@ -92,6 +98,84 @@ pub fn set_auto_watch(
 }
 
 #[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
+pub fn set_window_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<AppSettings, String> {
+    let mut settings = settings::load(&state.data_root).map_err(to_message)?;
+    settings.window_mode = mode;
+    settings::save(&state.data_root, &settings).map_err(to_message)?;
+
+    // 窗口操作放在 Rust 侧执行，不依赖前端窗口权限配置。
+    apply_window_mode(&app, &settings.window_mode)?;
+
+    to_app_settings(state.inner(), settings)
+}
+
+pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+
+    if mode == settings::WINDOW_MODE_WINDOWED {
+        window.set_fullscreen(false).map_err(|error| error.to_string())?;
+        window
+            .set_always_on_top(false)
+            .map_err(|error| error.to_string())?;
+        window
+            .set_skip_taskbar(false)
+            .map_err(|error| error.to_string())?;
+        window
+            .set_decorations(true)
+            .map_err(|error| error.to_string())?;
+    } else {
+        window.set_fullscreen(true).map_err(|error| error.to_string())?;
+        window
+            .set_always_on_top(false)
+            .map_err(|error| error.to_string())?;
+        window
+            .set_skip_taskbar(false)
+            .map_err(|error| error.to_string())?;
+        window
+            .set_decorations(false)
+            .map_err(|error| error.to_string())?;
+        let _ = window.set_focus();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_series_transition(
+    state: State<'_, AppState>,
+    transition: String,
+) -> Result<AppSettings, String> {
+    let mut settings = settings::load(&state.data_root).map_err(to_message)?;
+    settings.series_transition = transition;
+    settings::save(&state.data_root, &settings).map_err(to_message)?;
+
+    to_app_settings(state.inner(), settings)
+}
+
+#[tauri::command]
+pub fn set_page_transition(
+    state: State<'_, AppState>,
+    transition: String,
+) -> Result<AppSettings, String> {
+    let mut settings = settings::load(&state.data_root).map_err(to_message)?;
+    settings.page_transition = transition;
+    settings::save(&state.data_root, &settings).map_err(to_message)?;
+
+    to_app_settings(state.inner(), settings)
+}
+
+#[tauri::command]
 pub fn set_thumbnail_width(
     state: State<'_, AppState>,
     width: u32,
@@ -123,6 +207,9 @@ fn to_app_settings(state: &AppState, settings: Settings) -> Result<AppSettings, 
         data_root: state.data_root.display().to_string(),
         auto_watch: settings.auto_watch,
         thumbnail_width: settings.thumbnail_width,
+        page_transition: settings.page_transition,
+        series_transition: settings.series_transition,
+        window_mode: settings.window_mode,
     })
 }
 

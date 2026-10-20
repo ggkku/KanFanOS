@@ -1,27 +1,39 @@
 import { useEffect, useState } from "react";
 import {
+  AppWindow,
+  ArrowUpDown,
+  Clapperboard,
   Database,
   FolderCog,
   FolderOpen,
   HardDrive,
   Image,
   Info,
+  Power,
   RefreshCw,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { SelectMenu } from "../../components/common/SelectMenu";
 import {
   clearThumbnailCache,
   getCacheStats,
   getLibraryStats,
+  quitApp,
   setAutoWatch,
+  setPageTransition,
+  setSeriesTransition,
   setThumbnailWidth,
+  setWindowMode,
 } from "../../api/library";
 import { errorMessage } from "../../lib/errors";
 import type {
   AppSettings,
   CacheStats,
   LibraryStats,
+  PageTransition,
+  SeriesTransition,
+  WindowMode,
 } from "../../types/library";
 
 interface SettingsPageProps {
@@ -68,6 +80,28 @@ function formatBytes(bytes: number): string {
 const actionButton =
   "shrink-0 rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-[11px] text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40";
 
+const THUMBNAIL_WIDTH_OPTIONS = [320, 480, 640, 960].map((width) => ({
+  value: width,
+  label: `${width} px`,
+}));
+
+const PAGE_TRANSITION_OPTIONS: { value: PageTransition; label: string }[] = [
+  { value: "fade", label: "淡入滑动" },
+  { value: "slide", label: "整体滑动" },
+];
+
+const SERIES_TRANSITION_OPTIONS: { value: SeriesTransition; label: string }[] = [
+  { value: "rise", label: "淡入上浮" },
+  { value: "zoom", label: "缩放淡入" },
+  { value: "slide", label: "从右侧滑入" },
+  { value: "flip", label: "封面飞入" },
+];
+
+const WINDOW_MODE_OPTIONS: { value: WindowMode; label: string }[] = [
+  { value: "windowed", label: "窗口" },
+  { value: "borderless", label: "全屏" },
+];
+
 export function SettingsPage({
   settings,
   scanning,
@@ -80,7 +114,6 @@ export function SettingsPage({
   const [cache, setCache] = useState<CacheStats | null>(null);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -105,16 +138,10 @@ export function SettingsPage({
   const toggleAutoWatch = async () => {
     if (!settings) return;
     setError(null);
-    setMessage(null);
 
     try {
       const next = await setAutoWatch(!settings.autoWatch);
       onSettingsChange(next);
-      setMessage(
-        next.autoWatch
-          ? "已开启自动同步。"
-          : "已关闭自动同步，目录变化需要手动重新扫描。",
-      );
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -122,14 +149,51 @@ export function SettingsPage({
 
   const changeWidth = async (width: number) => {
     setError(null);
-    setMessage(null);
 
     try {
       const next = await setThumbnailWidth(width);
       onSettingsChange(next);
-      setMessage(
-        `缩略图宽度已设为 ${next.thumbnailWidth} px。仅影响之后生成的缩略图，清理缓存可全部重建。`,
-      );
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const changePageTransition = async (transition: PageTransition) => {
+    setError(null);
+
+    try {
+      const next = await setPageTransition(transition);
+      onSettingsChange(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const changeWindowMode = async (mode: WindowMode) => {
+    setError(null);
+
+    try {
+      const next = await setWindowMode(mode);
+      onSettingsChange(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const changeSeriesTransition = async (transition: SeriesTransition) => {
+    setError(null);
+
+    try {
+      const next = await setSeriesTransition(transition);
+      onSettingsChange(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const handleQuit = async () => {
+    try {
+      await quitApp();
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -149,16 +213,12 @@ export function SettingsPage({
 
     setClearing(true);
     setError(null);
-    setMessage(null);
 
     try {
-      const result = await clearThumbnailCache();
+      await clearThumbnailCache();
       const nextCache = await getCacheStats();
       setCache(nextCache);
       onCacheCleared();
-      setMessage(
-        `已清理 ${result.removedFiles.toLocaleString()} 个文件，释放 ${formatBytes(result.removedBytes)}。`,
-      );
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -238,21 +298,56 @@ export function SettingsPage({
           <div className="w-20 shrink-0 text-xs text-neutral-500">
             缩略图宽度
           </div>
-          <select
+          <SelectMenu
             value={settings?.thumbnailWidth ?? 480}
-            onChange={(event) =>
-              void changeWidth(Number(event.target.value))
-            }
+            options={THUMBNAIL_WIDTH_OPTIONS}
+            onChange={(width) => void changeWidth(width)}
             disabled={!hasRoot}
-            className="rounded-lg border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-300 focus:border-indigo-500/60 focus:outline-none disabled:opacity-40"
-          >
-            <option value={320}>320 px</option>
-            <option value={480}>480 px</option>
-            <option value={640}>640 px</option>
-            <option value={960}>960 px</option>
-          </select>
+            ariaLabel="缩略图宽度"
+          />
           <span className="text-[11px] text-neutral-600">
             仅影响之后生成的缩略图
+          </span>
+        </div>
+
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <ArrowUpDown size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">页面动画</div>
+          <SelectMenu
+            value={settings?.pageTransition ?? "fade"}
+            options={PAGE_TRANSITION_OPTIONS}
+            onChange={(transition) => void changePageTransition(transition)}
+            ariaLabel="页面动画"
+          />
+          <span className="text-[11px] text-neutral-600">
+            切换左侧页面时的过渡效果
+          </span>
+        </div>
+
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <AppWindow size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">窗口模式</div>
+          <SelectMenu
+            value={settings?.windowMode ?? "windowed"}
+            options={WINDOW_MODE_OPTIONS}
+            onChange={(mode) => void changeWindowMode(mode)}
+            ariaLabel="窗口模式"
+          />
+        </div>
+
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <Clapperboard size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">选集动画</div>
+          <SelectMenu
+            value={settings?.seriesTransition ?? "rise"}
+            options={SERIES_TRANSITION_OPTIONS}
+            onChange={(transition) =>
+              void changeSeriesTransition(transition)
+            }
+            ariaLabel="选集动画"
+          />
+          <span className="text-[11px] text-neutral-600">
+            打开番剧进入选集页时的过渡效果
           </span>
         </div>
 
@@ -299,12 +394,6 @@ export function SettingsPage({
         <InfoRow icon={Info} label="版本" value="KanFanOS 0.1.0" />
       </section>
 
-      {message && (
-        <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-300">
-          {message}
-        </div>
-      )}
-
       {error && (
         <div className="rounded-lg border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-300">
           操作失败：{error}
@@ -315,6 +404,17 @@ export function SettingsPage({
         首次扫描会在每部番剧文件夹内生成 kanfanos.toml，可编辑显示名、搜索别名和封面；
         已存在的文件不会被覆盖。数据库只保存索引，清理缓存不会删除任何原始视频。
       </p>
+
+      <div className="mt-auto flex justify-end pt-2">
+        <button
+          type="button"
+          onClick={() => void handleQuit()}
+          className="flex items-center gap-2 rounded-lg bg-red-600 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-red-500"
+        >
+          <Power size={14} />
+          退出系统
+        </button>
+      </div>
     </div>
   );
 }

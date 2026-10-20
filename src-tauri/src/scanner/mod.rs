@@ -19,7 +19,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
 
 use crate::{
-    catalog::{schedule_label, UNKNOWN_CATEGORY},
+    catalog::{
+        is_movie_category, schedule_label, MOVIE_CATEGORY, UNKNOWN_CATEGORY,
+    },
     database::videos::ScannedFile,
     series_config,
     state::{AppState, ScanState},
@@ -249,8 +251,13 @@ fn run(
         }
         let path = entry.path();
 
-        if let Some(category) = schedule_label(&name) {
-            // 时间分类目录：子目录是番剧，直接放在这里的视频单独成一部番剧。
+        // 档期目录和「剧场版」都作为分类：子目录是番剧/影片，
+        // 直接放在分类目录里的视频单独成一部。
+        let category = schedule_label(&name).or_else(|| {
+            is_movie_category(&name).then(|| MOVIE_CATEGORY.to_string())
+        });
+
+        if let Some(category) = category {
             ctx.note_category(&category)?;
 
             let children = match fs::read_dir(&path) {
@@ -478,7 +485,7 @@ mod tests {
 
     use super::scan_with_state;
     use crate::{
-        catalog::UNKNOWN_CATEGORY,
+        catalog::{MOVIE_CATEGORY, UNKNOWN_CATEGORY},
         database::Database,
         state::{AppState, ScanState},
         time::now_ms,
@@ -509,6 +516,45 @@ mod tests {
             },
             library.id,
         )
+    }
+
+    #[test]
+    fn scans_movie_category_as_top_level_category() {
+        let root = test_dir("scan-movies");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(MOVIE_CATEGORY).join("你的颜色")).unwrap();
+        fs::create_dir_all(root.join("2026年7月新番").join("测试番")).unwrap();
+
+        fs::write(
+            root.join(MOVIE_CATEGORY).join("你的颜色").join("movie.mp4"),
+            b"1",
+        )
+        .unwrap();
+        fs::write(
+            root.join("2026年7月新番").join("测试番").join("第1集.mp4"),
+            b"2",
+        )
+        .unwrap();
+
+        let (state, library_id) = open_state(&root);
+        let mut noop = |_| {};
+
+        let stats = scan_with_state(&state, library_id, &mut noop).unwrap();
+        assert_eq!(stats.series_found, 2);
+
+        let categories = state.db.list_categories(library_id).unwrap();
+        assert_eq!(categories[0].label, MOVIE_CATEGORY);
+        assert_eq!(categories[0].count, 1);
+        assert_eq!(categories[1].label, "2026年7月");
+
+        let movies = state
+            .db
+            .list_series_page(library_id, MOVIE_CATEGORY, "name", 100, 0)
+            .unwrap()
+            .items;
+        assert_eq!(movies.len(), 1);
+        assert_eq!(movies[0].name, "你的颜色");
+        assert_eq!(movies[0].episode_count, 1);
     }
 
     #[test]

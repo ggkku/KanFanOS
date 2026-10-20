@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { SeriesSummary } from "../../types/library";
 
 interface SeriesCardProps {
   series: SeriesSummary;
   coverUrl: string | null;
   subtitle?: string | null;
-  onOpen: () => void;
+  /// 打开时把封面的屏幕位置传出去，用于「封面飞入」过渡。
+  onOpen: (coverRect: DOMRect | null) => void;
 }
 
 export function SeriesCard({
@@ -15,15 +16,21 @@ export function SeriesCard({
   onOpen,
 }: SeriesCardProps) {
   const [imageFailed, setImageFailed] = useState(false);
+  const coverRef = useRef<HTMLDivElement>(null);
   const showImage = coverUrl != null && !imageFailed;
 
   return (
     <button
       type="button"
-      onClick={onOpen}
+      onClick={() =>
+        onOpen(coverRef.current?.getBoundingClientRect() ?? null)
+      }
       className="group flex min-w-0 flex-col text-left"
     >
-      <div className="relative aspect-[3/4] overflow-hidden rounded-xl border border-neutral-800 bg-gradient-to-br from-neutral-800 via-neutral-900 to-neutral-950 transition-colors group-hover:border-indigo-500/50">
+      <div
+        ref={coverRef}
+        className="relative aspect-[3/4] overflow-hidden rounded-xl border border-neutral-800 bg-gradient-to-br from-neutral-800 via-neutral-900 to-neutral-950 transition-colors group-hover:border-indigo-500/50"
+      >
         {showImage ? (
           <img
             src={coverUrl}

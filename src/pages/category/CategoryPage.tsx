@@ -1,8 +1,15 @@
 import { Film, Loader2, RefreshCw } from "lucide-react";
 import { EmptyState } from "../../components/common/EmptyState";
+import { SelectMenu } from "../../components/common/SelectMenu";
 import { SeriesCard } from "../../components/series/SeriesCard";
 import { seriesCoverUrl } from "../../lib/thumbnails";
 import type { SeriesSort, SeriesSummary } from "../../types/library";
+
+const SORT_OPTIONS: { value: SeriesSort; label: string }[] = [
+  { value: "name", label: "按名称" },
+  { value: "episodes", label: "按集数" },
+  { value: "updated", label: "按更新时间" },
+];
 
 interface CategoryPageProps {
   label: string;
@@ -14,7 +21,7 @@ interface CategoryPageProps {
   sort: SeriesSort;
   dataRoot: string | null;
   onSortChange: (sort: SeriesSort) => void;
-  onOpenSeries: (series: SeriesSummary) => void;
+  onOpenSeries: (series: SeriesSummary, coverRect: DOMRect | null) => void;
   onRescan: () => void;
   onLoadMore: () => void;
 }
@@ -42,17 +49,13 @@ export function CategoryPage({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <select
+          <SelectMenu
             value={sort}
-            onChange={(event) =>
-              onSortChange(event.target.value as SeriesSort)
-            }
-            className="rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-xs text-neutral-300 focus:border-indigo-500/60 focus:outline-none"
-          >
-            <option value="name">按名称</option>
-            <option value="episodes">按集数</option>
-            <option value="updated">按更新时间</option>
-          </select>
+            options={SORT_OPTIONS}
+            onChange={onSortChange}
+            align="right"
+            ariaLabel="排序方式"
+          />
 
           <button
             type="button"
@@ -84,7 +87,7 @@ export function CategoryPage({
                 key={item.id}
                 series={item}
                 coverUrl={seriesCoverUrl(item, dataRoot)}
-                onOpen={() => onOpenSeries(item)}
+                onOpen={(rect) => onOpenSeries(item, rect)}
               />
             ))}
           </div>

@@ -49,7 +49,7 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
         watcher: std::sync::Mutex::new(None),
         player: std::sync::Mutex::new(None),
         video_surface: std::sync::Mutex::new(None),
-        data_root: root,
+        data_root: root.clone(),
     });
 
     // 允许前端通过 asset 协议读取番剧文件夹里的封面图片。
@@ -70,6 +70,17 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
             library_id,
             std::path::PathBuf::from(library_root),
         );
+    }
+
+    // 主窗口在配置里是隐藏创建的，先应用窗口模式再显示，避免启动时闪烁。
+    if let Err(error) =
+        commands::settings::apply_window_mode(app.handle(), &app_settings.window_mode)
+    {
+        eprintln!("应用窗口模式失败: {error}");
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
     }
 
     Ok(())
@@ -95,6 +106,10 @@ pub fn run() {
             commands::settings::set_library_root,
             commands::settings::set_auto_watch,
             commands::settings::set_thumbnail_width,
+            commands::settings::set_page_transition,
+            commands::settings::set_series_transition,
+            commands::settings::set_window_mode,
+            commands::settings::quit_app,
             commands::cache::get_cache_stats,
             commands::cache::clear_thumbnail_cache,
             commands::catalog::list_categories,
@@ -113,8 +128,8 @@ pub fn run() {
             commands::playback::player_set_volume,
             commands::playback::player_set_muted,
             commands::playback::player_set_speed,
-            commands::playback::player_toggle_subtitles,
-            commands::playback::set_player_fullscreen,
+            commands::playback::player_set_subtitle,
+            commands::playback::set_player_cursor_visible,
             commands::playback::list_recent,
         ])
         .run(tauri::generate_context!())

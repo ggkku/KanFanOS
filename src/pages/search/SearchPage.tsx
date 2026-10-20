@@ -11,7 +11,7 @@ interface SearchPageProps {
   loading: boolean;
   loadingMore: boolean;
   dataRoot: string | null;
-  onOpenSeries: (item: SearchItem) => void;
+  onOpenSeries: (item: SearchItem, coverRect: DOMRect | null) => void;
   onLoadMore: () => void;
 }
 
@@ -57,7 +57,7 @@ export function SearchPage({
                     ? `${item.category} · ${item.matchPreview}`
                     : item.category
                 }
-                onOpen={() => onOpenSeries(item)}
+                onOpen={(rect) => onOpenSeries(item, rect)}
               />
             ))}
           </div>

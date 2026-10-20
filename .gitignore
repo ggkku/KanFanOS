@@ -26,3 +26,7 @@ dist-ssr
 # 本地测试用的番剧目录，不纳入版本管理
 /番/
 /新番/
+
+# tauri icon 顺带生成的移动端图标，本项目只面向 Windows
+src-tauri/icons/android/
+src-tauri/icons/ios/

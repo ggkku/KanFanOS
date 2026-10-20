@@ -101,24 +101,33 @@ pub fn player_set_speed(
 }
 
 #[tauri::command]
-pub fn set_player_fullscreen(
+pub fn set_player_cursor_visible(
     app: AppHandle,
-    fullscreen: bool,
+    visible: bool,
 ) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "找不到主窗口".to_string())?;
-
-    window
-        .set_fullscreen(fullscreen)
-        .map_err(|error| error.to_string())
+    playback::set_cursor_visible(&app, visible).map_err(to_message)
 }
 
 #[tauri::command]
-pub fn player_toggle_subtitles(app: AppHandle) -> Result<(), String> {
+pub fn player_set_subtitle(
+    app: AppHandle,
+    subtitle_id: Option<i64>,
+) -> Result<(), String> {
+    let sid = match subtitle_id {
+        Some(id) => json!(id),
+        None => json!("no"),
+    };
+
     playback::send(
         &app,
-        json!({ "command": ["cycle", "sub-visibility"] }),
+        json!({ "command": ["set_property", "sid", sid] }),
+    )
+    .map_err(to_message)?;
+
+    // 之前可能通过别的途径关掉了字幕显示，选轨时一并打开。
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "sub-visibility", true] }),
     )
     .map_err(to_message)
 }

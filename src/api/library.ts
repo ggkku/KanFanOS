@@ -11,13 +11,16 @@ import type {
   LibrarySummary,
   MediaProgress,
   MediaStats,
+  PageTransition,
   PlayerError,
+  SeriesTransition,
   PlayerRect,
   PlayerStarted,
   PlayerState,
   RecentItem,
   ScanProgress,
   ScanSummary,
+  WindowMode,
   SearchPage,
   SeriesPage,
   SeriesSort,
@@ -43,6 +46,26 @@ export function setAutoWatch(enabled: boolean): Promise<AppSettings> {
 
 export function setThumbnailWidth(width: number): Promise<AppSettings> {
   return invoke<AppSettings>("set_thumbnail_width", { width });
+}
+
+export function setPageTransition(
+  transition: PageTransition,
+): Promise<AppSettings> {
+  return invoke<AppSettings>("set_page_transition", { transition });
+}
+
+export function setSeriesTransition(
+  transition: SeriesTransition,
+): Promise<AppSettings> {
+  return invoke<AppSettings>("set_series_transition", { transition });
+}
+
+export function setWindowMode(mode: WindowMode): Promise<AppSettings> {
+  return invoke<AppSettings>("set_window_mode", { mode });
+}
+
+export function quitApp(): Promise<void> {
+  return invoke<void>("quit_app");
 }
 
 export function getCacheStats(): Promise<CacheStats> {
@@ -168,12 +191,12 @@ export function playerSetSpeed(speed: number): Promise<void> {
   return invoke<void>("player_set_speed", { speed });
 }
 
-export function playerToggleSubtitles(): Promise<void> {
-  return invoke<void>("player_toggle_subtitles");
+export function playerSetSubtitle(subtitleId: number | null): Promise<void> {
+  return invoke<void>("player_set_subtitle", { subtitleId });
 }
 
-export function setPlayerFullscreen(fullscreen: boolean): Promise<void> {
-  return invoke<void>("set_player_fullscreen", { fullscreen });
+export function setPlayerCursorVisible(visible: boolean): Promise<void> {
+  return invoke<void>("set_player_cursor_visible", { visible });
 }
 
 export function onPlayerState(
@@ -198,6 +221,12 @@ export function onPlayerError(
   return listen<PlayerError>("player-error", (event) =>
     handler(event.payload),
   );
+}
+
+export function onPlayerMouseActivity(
+  handler: () => void,
+): Promise<UnlistenFn> {
+  return listen("player-mouse-activity", () => handler());
 }
 
 export function listRecent(

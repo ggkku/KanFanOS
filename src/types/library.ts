@@ -15,12 +15,19 @@ export interface LibrarySummary {
   createdAt: number;
 }
 
+export type PageTransition = "fade" | "slide";
+export type SeriesTransition = "rise" | "zoom" | "slide" | "flip";
+export type WindowMode = "windowed" | "borderless";
+
 export interface AppSettings {
   libraryRoot: string | null;
   libraryId: number | null;
   dataRoot: string;
   autoWatch: boolean;
   thumbnailWidth: number;
+  pageTransition: PageTransition;
+  seriesTransition: SeriesTransition;
+  windowMode: WindowMode;
 }
 
 export interface CacheStats {
@@ -102,6 +109,12 @@ export interface PlayerRect {
   height: number;
 }
 
+export interface SubtitleTrack {
+  id: number;
+  title: string;
+  lang: string;
+}
+
 export interface PlayerState {
   episodeId: number;
   positionMs: number;
@@ -111,6 +124,9 @@ export interface PlayerState {
   muted: boolean;
   speed: number;
   ended: boolean;
+  subtitles: SubtitleTrack[];
+  subtitleId: number | null;
+  subtitlesVisible: boolean;
 }
 
 export interface PlayerStarted {

@@ -30,6 +30,256 @@ textarea,
   user-select: text;
 }
 
+/* 页面切换：按左侧导航的上下关系决定滑动方向 */
+@keyframes page-in-down {
+  from {
+    opacity: 0;
+    transform: translateY(-28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes page-out-down {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+}
+
+@keyframes page-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes page-out-up {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-28px);
+  }
+}
+
+@keyframes page-in-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes page-out-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 「整体滑动」模式：整页滑动，不做淡入淡出 */
+@keyframes page-slide-in-down {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes page-slide-out-down {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes page-slide-in-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes page-slide-out-up {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-100%);
+  }
+}
+
+/* 打开番剧进入选集页的过渡 */
+@keyframes detail-in-rise {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes detail-in-zoom {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes detail-in-slide {
+  from {
+    opacity: 0;
+    transform: translateX(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes detail-in-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes detail-out-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes detail-out-slide {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
+/* 从选集页返回：进入动画的倒放 */
+@keyframes detail-out-rise {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+
+@keyframes detail-out-zoom {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes detail-out-slide-right {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(40px);
+  }
+}
+
+.animate-detail-in-rise {
+  animation: detail-in-rise 300ms ease-out both;
+}
+
+.animate-detail-in-zoom {
+  animation: detail-in-zoom 300ms ease-out both;
+}
+
+.animate-detail-in-slide {
+  animation: detail-in-slide 300ms ease-out both;
+}
+
+.animate-detail-in-fade {
+  animation: detail-in-fade 300ms ease-out both;
+}
+
+.animate-detail-out-fade {
+  animation: detail-out-fade 300ms ease-out both;
+}
+
+.animate-detail-out-slide {
+  animation: detail-out-slide 300ms ease-out both;
+}
+
+.animate-detail-out-rise {
+  animation: detail-out-rise 300ms ease-out both;
+}
+
+.animate-detail-out-zoom {
+  animation: detail-out-zoom 300ms ease-out both;
+}
+
+.animate-detail-out-slide-right {
+  animation: detail-out-slide-right 300ms ease-out both;
+}
+
+/* 整体滑动使用更强的「先快后慢」曲线（expo-out）。 */
+.animate-page-slide-in-down {
+  animation: page-slide-in-down 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-page-slide-out-down {
+  animation: page-slide-out-down 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-page-slide-in-up {
+  animation: page-slide-in-up 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-page-slide-out-up {
+  animation: page-slide-out-up 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

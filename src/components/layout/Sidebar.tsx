@@ -1,5 +1,7 @@
-import { Clock, Film, Loader2, Search, Settings, X } from "lucide-react";
+import { Clock, Loader2, Search, Settings, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+// 直接使用 tauri icon 生成的大尺寸图标，换图标后无需再手动拷一份。
+import appIcon from "../../../src-tauri/icons/128x128@2x.png";
 import type { CategorySummary } from "../../types/library";
 import type { View } from "../../types/navigation";
 
@@ -51,15 +53,12 @@ export function Sidebar({
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-neutral-800 bg-neutral-900/60">
       <div className="flex items-center gap-3 px-5 py-5">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
-          <Film size={19} />
-        </div>
-        <div className="leading-tight">
-          <div className="text-sm font-semibold tracking-wide">KanFanOS</div>
-          <div className="mt-0.5 text-[11px] text-neutral-500">
-            本地番剧媒体库
-          </div>
-        </div>
+        <img
+          src={appIcon}
+          alt=""
+          className="h-9 w-9 shrink-0 object-contain"
+        />
+        <div className="text-sm font-semibold tracking-wide">KanFanOS</div>
       </div>
 
       <div className="px-3 pb-3">

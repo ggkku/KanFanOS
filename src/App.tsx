@@ -44,13 +44,38 @@ import type {
   SearchItem,
   SeriesSort,
   SeriesSummary,
+  SeriesTransition,
 } from "./types/library";
 import type { View } from "./types/navigation";
 
 const PAGE_SIZE = 60;
+/// 「最近观看」页面最多展示的条数。
+const RECENT_LIMIT = 6;
 
 function App() {
   const [view, setView] = useState<View>({ kind: "recent" });
+  // 页面切换动画：方向由左侧导航的上下顺序决定。
+  const [pageTransition, setPageTransition] = useState<"down" | "up" | "fade">(
+    "fade",
+  );
+  const [outgoingPage, setOutgoingPage] = useState<ReactNode>(null);
+  const outgoingTimer = useRef<number | null>(null);
+  const contentRef = useRef<ReactNode>(null);
+  // 打开番剧进入选集页的动画模式与封面飞入浮层。
+  const [detailAnimation, setDetailAnimation] =
+    useState<SeriesTransition>("rise");
+  const [flipCover, setFlipCover] = useState<{
+    url: string;
+    from: DOMRect;
+    /// 返回时的目标位置（卡片封面）。飞入时由详情页封面提供。
+    to?: DOMRect;
+  } | null>(null);
+  // 记住打开详情时卡片封面的位置，返回时封面飞回去。
+  const flipOriginRef = useRef<{ url: string; from: DOMRect } | null>(null);
+  // 从选集页返回时使用的倒放动画。
+  const [detailReturn, setDetailReturn] = useState<SeriesTransition | null>(
+    null,
+  );
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [categories, setCategories] = useState<CategorySummary[]>([]);
   const [series, setSeries] = useState<SeriesSummary[]>([]);
@@ -85,6 +110,7 @@ function App() {
   );
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeVisible, setNoticeVisible] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
   // 启动时读取配置与档期。
@@ -315,7 +341,7 @@ function App() {
     let disposed = false;
     setRecentLoading(true);
 
-    listRecent(libraryId, 50)
+    listRecent(libraryId, RECENT_LIMIT)
       .then((items) => {
         if (!disposed) setRecentItems(items);
       })
@@ -331,11 +357,75 @@ function App() {
     };
   }, [view, settings?.libraryId, refreshKey, recentVersion]);
 
+  // 导航项在侧栏里的顺序：最近观看 → 各档期 → 设置。
+  const navIndex = (target: View): number | null => {
+    if (target.kind === "recent") return 0;
+    if (target.kind === "category") {
+      const index = categories.findIndex(
+        (item) => item.key === target.category,
+      );
+      return index >= 0 ? index + 1 : null;
+    }
+    return categories.length + 1;
+  };
+
   const navigate = (next: View) => {
+    const from = navIndex(view);
+    const to = navIndex(next);
+
+    if (from != null && to != null && from !== to) {
+      // 目标在下方时内容向上移动（新页面从下方进入），与列表滚动方向一致。
+      const direction = to > from ? "up" : "down";
+      setPageTransition(direction);
+      setDetailReturn(null);
+      // 用当前页面的元素做退出动画。
+      setOutgoingPage(contentRef.current);
+      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
+      const duration =
+        settings?.pageTransition === "slide" ? 360 : 260;
+      outgoingTimer.current = window.setTimeout(() => {
+        setOutgoingPage(null);
+      }, duration + 40);
+    }
+
     setSelectedSeries(null);
     setEpisodes([]);
     setQuery("");
+    setFlipCover(null);
+    flipOriginRef.current = null;
     setView(next);
+  };
+
+  // 从选集页返回：使用进入动画的倒放。
+  const closeSeries = () => {
+    const content = contentRef.current;
+    setDetailReturn(detailAnimation);
+
+    if (content) {
+      setOutgoingPage(content);
+      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
+      // 只移除退场层，detailReturn 保留到下一次真正的页面切换，
+      // 否则它一变回 null，进入动画的 class 会改变并重播一次页面切换动画。
+      outgoingTimer.current = window.setTimeout(() => {
+        setOutgoingPage(null);
+      }, 340);
+    } else {
+      setDetailReturn(null);
+    }
+
+    // 封面飞入模式：让详情页封面飞回原来的卡片位置。
+    if (detailAnimation === "flip" && flipOriginRef.current) {
+      const cover = document.querySelector<HTMLElement>("[data-series-cover]");
+      const rect = cover?.getBoundingClientRect();
+      if (rect) {
+        const origin = flipOriginRef.current;
+        setFlipCover({ url: origin.url, from: rect, to: origin.from });
+      }
+      flipOriginRef.current = null;
+    }
+
+    setSelectedSeries(null);
+    setEpisodes([]);
   };
 
   const handleQueryChange = (value: string) => {
@@ -396,10 +486,66 @@ function App() {
     }
   };
 
+  // 扫描结果提示：淡入出现，几秒后淡出收起。
+  const noticeTimer = useRef<number | null>(null);
+  const noticeCleanupTimer = useRef<number | null>(null);
+  const noticeShown = useRef(false);
+
+  const clearNotice = useCallback(() => {
+    if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+    if (noticeCleanupTimer.current) {
+      window.clearTimeout(noticeCleanupTimer.current);
+      noticeCleanupTimer.current = null;
+    }
+    if (!noticeShown.current) return;
+
+    setNoticeVisible(false);
+    noticeCleanupTimer.current = window.setTimeout(() => {
+      noticeShown.current = false;
+      setNotice(null);
+    }, 300);
+  }, []);
+
+  const showNotice = useCallback((message: string) => {
+    if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+    if (noticeCleanupTimer.current) {
+      window.clearTimeout(noticeCleanupTimer.current);
+      noticeCleanupTimer.current = null;
+    }
+
+    if (noticeShown.current) {
+      setNotice(message);
+      setNoticeVisible(true);
+    } else {
+      noticeShown.current = true;
+      setNotice(message);
+      setNoticeVisible(false);
+      // 先以收起状态挂载，再在下一帧展开，才能触发过渡。
+      requestAnimationFrame(() => setNoticeVisible(true));
+    }
+
+    noticeTimer.current = window.setTimeout(() => {
+      setNoticeVisible(false);
+      noticeCleanupTimer.current = window.setTimeout(() => {
+        noticeShown.current = false;
+        setNotice(null);
+      }, 300);
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+      if (noticeCleanupTimer.current) {
+        window.clearTimeout(noticeCleanupTimer.current);
+      }
+    };
+  }, []);
+
   const runScan = useCallback(async (libraryId: number) => {
     setScanning(true);
     setError(null);
-    setNotice(null);
+    clearNotice();
     setProgress({
       libraryId,
       phase: "scanning",
@@ -439,7 +585,7 @@ function App() {
       });
 
       if (summary.cancelled) {
-        setNotice(
+        showNotice(
           `扫描已取消：发现 ${summary.seriesFound} 部番剧、${summary.filesFound.toLocaleString()} 个视频。`,
         );
       } else {
@@ -453,7 +599,7 @@ function App() {
         if (summary.errors > 0) {
           parts.push(`${summary.errors.toLocaleString()} 个文件读取失败`);
         }
-        setNotice(
+        showNotice(
           `扫描完成：${parts.join("，")}（${(summary.elapsedMs / 1000).toFixed(1)} 秒）。`,
         );
       }
@@ -463,7 +609,7 @@ function App() {
       setScanning(false);
       setProgress(null);
     }
-  }, []);
+  }, [clearNotice, showNotice]);
 
   // 已经配置了目录但数据库里没有任何索引时，自动扫描一次。
   const autoScanned = useRef(false);
@@ -494,14 +640,40 @@ function App() {
       const library = await setLibraryRoot(selected);
       const nextSettings = await getSettings();
       setSettings(nextSettings);
-      setNotice(`已设置番剧目录：${library.rootPath}`);
+      showNotice(`已设置番剧目录：${library.rootPath}`);
       await runScan(library.id);
     } catch (err) {
       setError(errorMessage(err));
     }
   };
 
-  const openSeries = async (target: SeriesSummary) => {
+  const openSeries = async (
+    target: SeriesSummary,
+    coverRect?: DOMRect | null,
+  ) => {
+    const mode = settings?.seriesTransition ?? "rise";
+    setDetailAnimation(mode);
+
+    // 旧页面退场。
+    if (contentRef.current) {
+      setOutgoingPage(contentRef.current);
+      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
+      outgoingTimer.current = window.setTimeout(() => {
+        setOutgoingPage(null);
+      }, 340);
+    }
+
+    // 封面飞入：先记下卡片封面在屏幕上的位置，详情页挂载后再算目标位置。
+    const coverUrl = seriesCoverUrl(target, settings?.dataRoot ?? null);
+    if (mode === "flip" && coverRect && coverUrl) {
+      flipOriginRef.current = { url: coverUrl, from: coverRect };
+      setFlipCover({ url: coverUrl, from: coverRect });
+    } else {
+      flipOriginRef.current = null;
+      setFlipCover(null);
+    }
+    setDetailReturn(null);
+
     setSelectedSeries(target);
     try {
       const rows = await listEpisodes(target.id);
@@ -588,10 +760,7 @@ function App() {
         episodes={episodes}
         dataRoot={settings?.dataRoot ?? null}
         coverUrl={seriesCoverUrl(selectedSeries, settings?.dataRoot ?? null)}
-        onBack={() => {
-          setSelectedSeries(null);
-          setEpisodes([]);
-        }}
+        onBack={closeSeries}
         onPlay={(episode) => {
           if (selectedSeries) {
             openPlayer(selectedSeries, episodes, episode);
@@ -610,7 +779,7 @@ function App() {
         loading={searchLoading}
         loadingMore={searchLoadingMore}
         dataRoot={settings?.dataRoot ?? null}
-        onOpenSeries={(item) => void openSeries(item)}
+        onOpenSeries={(item, rect) => void openSeries(item, rect)}
         onLoadMore={() => void loadMoreSearch()}
       />
     );
@@ -650,12 +819,158 @@ function App() {
         sort={sort}
         dataRoot={settings?.dataRoot ?? null}
         onSortChange={setSort}
-        onOpenSeries={(item) => void openSeries(item)}
+        onOpenSeries={(item, rect) => void openSeries(item, rect)}
         onRescan={rescan}
         onLoadMore={() => void loadMoreSeries()}
       />
     );
   }
+
+  // 保存当前页面元素，供下一次导航做退出动画。
+  useEffect(() => {
+    contentRef.current = content;
+  });
+
+  useEffect(() => {
+    return () => {
+      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
+    };
+  }, []);
+
+  const viewKey = selectedSeries
+    ? `series:${selectedSeries.id}`
+    : view.kind === "category"
+      ? `category:${view.category}`
+      : view.kind;
+
+  const isSlideTransition = settings?.pageTransition === "slide";
+
+  const enterAnimation = isSlideTransition
+    ? pageTransition === "down"
+      ? "animate-page-slide-in-down"
+      : pageTransition === "up"
+        ? "animate-page-slide-in-up"
+        : "animate-[page-in-fade_260ms_ease-out_both]"
+    : pageTransition === "down"
+      ? "animate-[page-in-down_260ms_ease-out_both]"
+      : pageTransition === "up"
+        ? "animate-[page-in-up_260ms_ease-out_both]"
+        : "animate-[page-in-fade_260ms_ease-out_both]";
+
+  const exitAnimation = isSlideTransition
+    ? pageTransition === "down"
+      ? "animate-page-slide-out-down"
+      : pageTransition === "up"
+        ? "animate-page-slide-out-up"
+        : "animate-[page-out-fade_260ms_ease-out_both]"
+    : pageTransition === "down"
+      ? "animate-[page-out-down_260ms_ease-out_both]"
+      : pageTransition === "up"
+        ? "animate-[page-out-up_260ms_ease-out_both]"
+        : "animate-[page-out-fade_260ms_ease-out_both]";
+
+  const detailEnterAnimation =
+    detailAnimation === "rise"
+      ? "animate-detail-in-rise"
+      : detailAnimation === "zoom"
+        ? "animate-detail-in-zoom"
+        : detailAnimation === "slide"
+          ? "animate-detail-in-slide"
+          : "animate-detail-in-fade";
+
+  const detailExitAnimation =
+    detailAnimation === "slide"
+      ? "animate-detail-out-slide"
+      : "animate-detail-out-fade";
+
+  const detailReverseExitAnimation =
+    detailAnimation === "rise"
+      ? "animate-detail-out-rise"
+      : detailAnimation === "zoom"
+        ? "animate-detail-out-zoom"
+        : detailAnimation === "slide"
+          ? "animate-detail-out-slide-right"
+          : "animate-detail-out-fade";
+
+  const activeEnterAnimation = detailReturn
+    ? "animate-detail-in-fade"
+    : selectedSeries
+      ? detailEnterAnimation
+      : enterAnimation;
+  const activeExitAnimation = detailReturn
+    ? detailReverseExitAnimation
+    : selectedSeries
+      ? detailExitAnimation
+      : exitAnimation;
+
+  // 封面飞入/飞出：浮层图片在卡片封面和详情页封面之间动画。
+  useEffect(() => {
+    if (!flipCover) return;
+
+    const frame = requestAnimationFrame(() => {
+      const overlay = document.querySelector<HTMLImageElement>(
+        "[data-flip-cover]",
+      );
+
+      if (!overlay) {
+        setFlipCover(null);
+        return;
+      }
+
+      // 飞入时目标在详情页里；返回时目标已经由 flipCover.to 给出。
+      let target = flipCover.to ?? null;
+      let targetElement: HTMLElement | null = null;
+
+      if (!target) {
+        targetElement = document.querySelector<HTMLElement>(
+          "[data-series-cover]",
+        );
+        target = targetElement?.getBoundingClientRect() ?? null;
+      }
+
+      const visible =
+        target != null &&
+        target.width > 0 &&
+        target.height > 0 &&
+        target.bottom > 0 &&
+        target.top < window.innerHeight;
+
+      if (!target || !visible) {
+        setFlipCover(null);
+        return;
+      }
+
+      const from = flipCover.from;
+      const dx = target.left - from.left;
+      const dy = target.top - from.top;
+      const scaleX = target.width / from.width;
+      const scaleY = target.height / from.height;
+
+      if (targetElement) targetElement.style.visibility = "hidden";
+      const animation = overlay.animate(
+        [
+          { transform: "translate(0, 0) scale(1, 1)" },
+          {
+            transform: `translate(${dx}px, ${dy}px) scale(${scaleX}, ${scaleY})`,
+          },
+        ],
+        {
+          duration: 320,
+          easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+          // 保持最后一帧，避免动画结束后浮层先跳回起点再被移除。
+          fill: "forwards",
+        },
+      );
+
+      animation.onfinish = () => {
+        if (targetElement) targetElement.style.visibility = "";
+        overlay.style.visibility = "hidden";
+        setFlipCover(null);
+      };
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [flipCover]);
 
   return (
     <>
@@ -689,14 +1004,56 @@ function App() {
         </div>
       )}
 
-      {notice && (
-        <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-300">
+      {(notice || noticeVisible) && (
+        <div
+          className={`fixed left-[calc(50%+7.5rem)] top-6 z-[60] max-w-md -translate-x-1/2 rounded-lg border border-emerald-900/60 bg-emerald-950/90 px-4 py-3 text-sm text-emerald-300 shadow-2xl backdrop-blur transition-all duration-300 ease-out ${
+            noticeVisible
+              ? "translate-y-0 opacity-100"
+              : "-translate-y-2 opacity-0"
+          }`}
+        >
           {notice}
         </div>
       )}
 
-        {content}
+        <div
+          className={`relative flex flex-1 flex-col ${
+            outgoingPage && isSlideTransition ? "overflow-hidden" : ""
+          }`}
+        >
+          {outgoingPage && (
+            <div
+              className={`pointer-events-none absolute inset-0 ${activeExitAnimation}`}
+              aria-hidden
+            >
+              {outgoingPage}
+            </div>
+          )}
+
+          <div
+            key={viewKey}
+            className={`flex flex-1 flex-col ${activeEnterAnimation}`}
+          >
+            {content}
+          </div>
+        </div>
       </AppShell>
+
+      {flipCover && (
+        <img
+          data-flip-cover
+          src={flipCover.url}
+          alt=""
+          className="pointer-events-none fixed z-[70] rounded-xl border border-neutral-800 object-cover"
+          style={{
+            left: flipCover.from.left,
+            top: flipCover.from.top,
+            width: flipCover.from.width,
+            height: flipCover.from.height,
+            transformOrigin: "top left",
+          }}
+        />
+      )}
 
       {playerTarget && (
         <PlayerDrawer
