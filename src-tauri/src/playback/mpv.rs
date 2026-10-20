@@ -35,6 +35,7 @@ pub fn spawn_embedded(
     pipe: &str,
     wid: isize,
     input_conf: &str,
+    log_file: &str,
 ) -> Result<Child> {
     let mut command = Command::new("mpv");
     command
@@ -44,6 +45,13 @@ pub fn spawn_embedded(
         .arg("--keep-open=yes")
         .arg("--sub-auto=fuzzy")
         .arg("--force-window=yes")
+        // 软件解码。部分老显卡驱动上 D3D11 硬件解码会出现音画不同步和卡顿，
+        // 而 1080p H.264 的软件解码开销很低。
+        .arg("--hwdec=no")
+        // 精确 seek，避免在关键帧间隔较大的文件上跳转后长时间等待。
+        .arg("--hr-seek=yes")
+        .arg("--msg-level=all=warn")
+        .arg(format!("--log-file={log_file}"))
         .arg(format!("--wid={wid}"))
         .arg(format!("--input-conf={input_conf}"))
         .arg(format!("--input-ipc-server={pipe}"));
@@ -76,7 +84,8 @@ pub(crate) async fn connect_with_retry(
         match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe) {
             Ok(client) => return Ok(client),
             Err(error) => {
-                if started.elapsed() > Duration::from_secs(5) {
+                // 音频设备较多时 mpv 启动可能偏慢，给足时间再判定失败。
+                if started.elapsed() > Duration::from_secs(15) {
                     bail!("连接 mpv IPC 失败: {error}");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -95,7 +104,8 @@ pub(crate) async fn connect_with_retry(
         match tokio::net::UnixStream::connect(pipe).await {
             Ok(stream) => return Ok(stream),
             Err(error) => {
-                if started.elapsed() > Duration::from_secs(5) {
+                // 音频设备较多时 mpv 启动可能偏慢，给足时间再判定失败。
+                if started.elapsed() > Duration::from_secs(15) {
                     bail!("连接 mpv IPC 失败: {error}");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;

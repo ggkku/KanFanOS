@@ -11,6 +11,7 @@ import type {
   LibrarySummary,
   MediaProgress,
   MediaStats,
+  PlayerError,
   PlayerRect,
   PlayerStarted,
   PlayerState,
@@ -187,6 +188,14 @@ export function onPlayerClosed(
   handler: (episodeId: number) => void,
 ): Promise<UnlistenFn> {
   return listen<number>("player-closed", (event) =>
+    handler(event.payload),
+  );
+}
+
+export function onPlayerError(
+  handler: (payload: PlayerError) => void,
+): Promise<UnlistenFn> {
+  return listen<PlayerError>("player-error", (event) =>
     handler(event.payload),
   );
 }

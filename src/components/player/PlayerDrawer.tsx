@@ -16,6 +16,7 @@ import {
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   onPlayerClosed,
+  onPlayerError,
   onPlayerState,
   playerSeek,
   playerSetMuted,
@@ -151,6 +152,7 @@ export function PlayerDrawer({
     let disposed = false;
     let unlistenState: UnlistenFn | undefined;
     let unlistenClosed: UnlistenFn | undefined;
+    let unlistenError: UnlistenFn | undefined;
 
     onPlayerState((state) => {
       if (disposed || state.episodeId !== episode.id) return;
@@ -169,10 +171,20 @@ export function PlayerDrawer({
       else unlistenClosed = fn;
     });
 
+    onPlayerError((payload) => {
+      if (disposed || payload.episodeId !== episode.id) return;
+      setError(payload.message);
+      setStarting(false);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenError = fn;
+    });
+
     return () => {
       disposed = true;
       unlistenState?.();
       unlistenClosed?.();
+      unlistenError?.();
     };
   }, [episode.id]);
 

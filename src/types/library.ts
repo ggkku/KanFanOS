@@ -119,6 +119,11 @@ export interface PlayerStarted {
   startPositionMs: number;
 }
 
+export interface PlayerError {
+  episodeId: number;
+  message: string;
+}
+
 export interface MediaStats {
   pending: number;
   processing: number;

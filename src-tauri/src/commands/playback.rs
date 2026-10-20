@@ -26,7 +26,7 @@ pub fn start_player(
     playback::start(&app, &episode, episode_id, rect).map_err(to_message)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_player(app: AppHandle) {
     playback::stop(&app);
 }

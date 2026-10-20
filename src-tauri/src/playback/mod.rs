@@ -17,6 +17,14 @@ use crate::{database::history::PlayableEpisode, state::AppState, time::now_ms};
 
 pub const STATE_EVENT: &str = "player-state";
 pub const CLOSED_EVENT: &str = "player-closed";
+pub const ERROR_EVENT: &str = "player-error";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerError {
+    pub episode_id: i64,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +82,10 @@ pub fn start(
     let start_ms = if completed { 0 } else { last_position };
 
     let input_conf = ensure_input_conf(&state.data_root)?;
+    let log_file = state
+        .data_root
+        .join("logs")
+        .join(format!("mpv-{episode_id}.log"));
     let pipe = mpv::pipe_name(episode_id);
     let child = mpv::spawn_embedded(
         &episode.path,
@@ -81,6 +93,7 @@ pub fn start(
         &pipe,
         surface,
         &input_conf,
+        &log_file.to_string_lossy(),
     )?;
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -176,21 +189,21 @@ fn stop_session(app: &AppHandle) {
     surface::hide(session.surface);
 
     let PlayerSession { mut child, .. } = session;
-    std::thread::spawn(move || {
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if started.elapsed() > Duration::from_secs(2) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => return,
+    let started = Instant::now();
+
+    // 同步等待旧进程退出，避免重新播放时新旧 mpv 同时占用同一个窗口句柄。
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > Duration::from_secs(2) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
             }
+            Ok(None) => std::thread::sleep(Duration::from_millis(30)),
+            Err(_) => break,
         }
-    });
+    }
 }
 
 fn scaled_rect(app: &AppHandle, rect: PlayerRect) -> Result<(i32, i32, i32, i32)> {
@@ -293,7 +306,37 @@ fn spawn_worker(
     tauri::async_runtime::spawn(async move {
         if let Err(error) = worker(&app, episode_id, duration_ms, &pipe, rx).await {
             eprintln!("播放器 IPC 结束: {error:#}");
-            cleanup(&app, episode_id);
+
+            let state = app.state::<AppState>();
+            let exited = state
+                .player
+                .lock()
+                .ok()
+                .and_then(|mut guard| {
+                    guard
+                        .as_mut()
+                        .and_then(|session| session.child.try_wait().ok().flatten())
+                })
+                .is_some();
+
+            if exited {
+                // mpv 已经退出，说明启动失败，收起视频区域。
+                cleanup(&app, episode_id);
+            }
+
+            let message = if exited {
+                format!("播放器启动失败: {error:#}")
+            } else {
+                format!("播放控制连接失败，视频可能仍在播放: {error:#}")
+            };
+
+            let _ = app.emit(
+                ERROR_EVENT,
+                PlayerError {
+                    episode_id,
+                    message,
+                },
+            );
         }
     });
 }
