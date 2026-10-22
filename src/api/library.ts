@@ -44,6 +44,10 @@ export function setAutoWatch(enabled: boolean): Promise<AppSettings> {
   return invoke<AppSettings>("set_auto_watch", { enabled });
 }
 
+export function setAutoStart(enabled: boolean): Promise<AppSettings> {
+  return invoke<AppSettings>("set_auto_start", { enabled });
+}
+
 export function setThumbnailWidth(width: number): Promise<AppSettings> {
   return invoke<AppSettings>("set_thumbnail_width", { width });
 }
@@ -114,6 +118,27 @@ export function searchSeries(
 
 export function listEpisodes(seriesId: number): Promise<EpisodeSummary[]> {
   return invoke<EpisodeSummary[]>("list_episodes", { seriesId });
+}
+
+export function listExtraEpisodes(
+  seriesId: number,
+): Promise<EpisodeSummary[]> {
+  return invoke<EpisodeSummary[]>("list_extra_episodes", { seriesId });
+}
+
+export function markSeriesWatched(seriesId: number): Promise<number> {
+  return invoke<number>("mark_series_watched", { seriesId });
+}
+
+export function clearSeriesHistory(seriesId: number): Promise<number> {
+  return invoke<number>("clear_series_history", { seriesId });
+}
+
+export function setSeriesWatchCount(
+  seriesId: number,
+  count: number,
+): Promise<number> {
+  return invoke<number>("set_series_watch_count", { seriesId, count });
 }
 
 export function scanLibrary(libraryId: number): Promise<ScanSummary> {
@@ -195,6 +220,14 @@ export function playerSetSubtitle(subtitleId: number | null): Promise<void> {
   return invoke<void>("player_set_subtitle", { subtitleId });
 }
 
+export function playerSetSubDelay(seconds: number): Promise<void> {
+  return invoke<void>("player_set_sub_delay", { seconds });
+}
+
+export function playerSetAudio(audioId: number): Promise<void> {
+  return invoke<void>("player_set_audio", { audioId });
+}
+
 export function setPlayerCursorVisible(visible: boolean): Promise<void> {
   return invoke<void>("set_player_cursor_visible", { visible });
 }
@@ -227,6 +260,10 @@ export function onPlayerMouseActivity(
   handler: () => void,
 ): Promise<UnlistenFn> {
   return listen("player-mouse-activity", () => handler());
+}
+
+export function onPlayerClick(handler: () => void): Promise<UnlistenFn> {
+  return listen("player-click", () => handler());
 }
 
 export function listRecent(

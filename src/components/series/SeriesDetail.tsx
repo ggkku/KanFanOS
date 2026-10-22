@@ -1,4 +1,11 @@
-import { ArrowLeft, Film, Play } from "lucide-react";
+import { useState } from "react";
+import { ArrowLeft, Clapperboard, Film, Play } from "lucide-react";
+import {
+  clearSeriesHistory,
+  markSeriesWatched,
+  setSeriesWatchCount,
+} from "../../api/library";
+import { errorMessage } from "../../lib/errors";
 import { thumbnailUrl } from "../../lib/thumbnails";
 import type { EpisodeSummary, SeriesSummary } from "../../types/library";
 
@@ -7,8 +14,11 @@ interface SeriesDetailProps {
   episodes: EpisodeSummary[];
   dataRoot: string | null;
   coverUrl: string | null;
+  extraCount: number;
   onBack: () => void;
   onPlay: (episode: EpisodeSummary) => void;
+  onOpenExtras: () => void;
+  onChanged: () => Promise<void>;
 }
 
 function formatBytes(bytes: number): string {
@@ -38,9 +48,32 @@ export function SeriesDetail({
   episodes,
   dataRoot,
   coverUrl,
+  extraCount,
   onBack,
   onPlay,
+  onOpenExtras,
+  onChanged,
 }: SeriesDetailProps) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const runAction = async (name: string, action: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(name);
+    setActionError(null);
+    try {
+      await action();
+      await onChanged();
+    } catch (err) {
+      setActionError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const actionButton =
+    "rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-[11px] text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40";
+
   return (
     <div className="flex flex-1 flex-col gap-6">
       <button
@@ -53,13 +86,22 @@ export function SeriesDetail({
       </button>
 
       <header className="flex items-start gap-5">
-        {coverUrl && (
+        {coverUrl ? (
           <img
             data-series-cover
             src={coverUrl}
             alt=""
             className="h-40 w-30 shrink-0 rounded-lg border border-neutral-800 object-cover"
           />
+        ) : (
+          <div
+            data-series-cover
+            className="flex h-40 w-30 shrink-0 items-center justify-center rounded-lg border border-neutral-800 bg-gradient-to-br from-neutral-800 via-neutral-900 to-neutral-950"
+          >
+            <span className="text-4xl font-semibold text-neutral-700">
+              {series.name.slice(0, 1)}
+            </span>
+          </div>
         )}
 
         <div className="min-w-0">
@@ -73,6 +115,89 @@ export function SeriesDetail({
           >
             {series.path}
           </p>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                void runAction("watched", () =>
+                  markSeriesWatched(series.id),
+                )
+              }
+              disabled={busy != null}
+              className={actionButton}
+            >
+              {busy === "watched" ? "标记中…" : "全部标记已看完"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                void runAction("clear", () =>
+                  clearSeriesHistory(series.id),
+                )
+              }
+              disabled={busy != null}
+              className={`${actionButton} hover:border-red-900/60 hover:bg-red-950/30 hover:text-red-300`}
+            >
+              {busy === "clear" ? "清除中…" : "清除观看记录"}
+            </button>
+
+            <div className="flex items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-[11px] text-neutral-400">
+              <span>看过</span>
+              <button
+                type="button"
+                onClick={() =>
+                  void runAction("count", () =>
+                    setSeriesWatchCount(
+                      series.id,
+                      Math.max(0, series.watchCount - 1),
+                    ),
+                  )
+                }
+                disabled={busy != null || series.watchCount <= 0}
+                className="flex h-5 w-5 items-center justify-center rounded text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-30"
+                title="减少一遍"
+              >
+                −
+              </button>
+              <span className="min-w-4 text-center tabular-nums text-neutral-200">
+                {series.watchCount}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  void runAction("count", () =>
+                    setSeriesWatchCount(
+                      series.id,
+                      series.watchCount + 1,
+                    ),
+                  )
+                }
+                disabled={busy != null}
+                className="flex h-5 w-5 items-center justify-center rounded text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-30"
+                title="增加一遍"
+              >
+                +
+              </button>
+              <span>遍</span>
+            </div>
+
+            {extraCount > 0 && (
+              <button
+                type="button"
+                onClick={onOpenExtras}
+                className="flex items-center gap-1.5 rounded-lg border border-indigo-900/60 bg-indigo-950/30 px-2.5 py-1.5 text-[11px] text-indigo-300 transition-colors hover:bg-indigo-950/60"
+              >
+                <Clapperboard size={12} />
+                其他视频 · {extraCount}
+              </button>
+            )}
+          </div>
+
+          {actionError && (
+            <p className="mt-2 text-[11px] text-red-400">{actionError}</p>
+          )}
         </div>
       </header>
 

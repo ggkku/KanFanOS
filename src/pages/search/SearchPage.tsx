@@ -10,7 +10,6 @@ interface SearchPageProps {
   total: number;
   loading: boolean;
   loadingMore: boolean;
-  dataRoot: string | null;
   onOpenSeries: (item: SearchItem, coverRect: DOMRect | null) => void;
   onLoadMore: () => void;
 }
@@ -21,7 +20,6 @@ export function SearchPage({
   total,
   loading,
   loadingMore,
-  dataRoot,
   onOpenSeries,
   onLoadMore,
 }: SearchPageProps) {
@@ -51,7 +49,7 @@ export function SearchPage({
               <SeriesCard
                 key={item.id}
                 series={item}
-                coverUrl={seriesCoverUrl(item, dataRoot)}
+                coverUrl={seriesCoverUrl(item)}
                 subtitle={
                   item.matchPreview
                     ? `${item.category} · ${item.matchPreview}`

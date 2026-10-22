@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  AudioLines,
   Captions,
   CaptionsOff,
   Check,
@@ -23,13 +24,16 @@ import {
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   onPlayerClosed,
+  onPlayerClick,
   onPlayerError,
   onPlayerMouseActivity,
   onPlayerState,
   playerSeek,
+  playerSetAudio,
   playerSetMuted,
   playerSetPaused,
   playerSetSpeed,
+  playerSetSubDelay,
   playerSetSubtitle,
   playerSetVolume,
   resizePlayer,
@@ -40,6 +44,7 @@ import {
 import { errorMessage } from "../../lib/errors";
 import { thumbnailUrl } from "../../lib/thumbnails";
 import type {
+  AudioTrack,
   EpisodeSummary,
   PlayerState,
   SeriesSummary,
@@ -91,7 +96,7 @@ function fitToAspect(
   };
 }
 
-function SubtitleChip({
+function TrackChip({
   label,
   selected,
   onClick,
@@ -116,6 +121,10 @@ function SubtitleChip({
   );
 }
 
+function audioTrackLabel(track: AudioTrack): string {
+  return track.title || track.lang || `音轨 ${track.id}`;
+}
+
 export function PlayerDrawer({
   series,
   episodes,
@@ -137,6 +146,9 @@ export function PlayerDrawer({
   const [seekTarget, setSeekTarget] = useState<number | null>(null);
   const [volumePreview, setVolumePreview] = useState<number | null>(null);
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
+  const [audioMenuOpen, setAudioMenuOpen] = useState(false);
+  // 字幕整体时间偏移；正数延后、负数提前。每次换集 mpv 都是新进程，重置为 0。
+  const [subtitleDelayMs, setSubtitleDelayMs] = useState(0);
   // 全屏时控制栏自动隐藏，鼠标移动时重新出现。
   const [controlsVisible, setControlsVisible] = useState(true);
   const [activityTick, setActivityTick] = useState(0);
@@ -148,6 +160,13 @@ export function PlayerDrawer({
   const flipAnimRef = useRef<Animation | null>(null);
   const flipFrameRef = useRef<number | null>(null);
   const lastFullscreenRef = useRef(fullscreen);
+  const subtitleDelayRef = useRef(0);
+
+  const hideControls = useCallback(() => {
+    setSubtitleMenuOpen(false);
+    setAudioMenuOpen(false);
+    setControlsVisible(false);
+  }, []);
   // 控制栏：全屏切换时逐帧跟随视频矩形。
   const controlsRef = useRef<HTMLDivElement>(null);
 
@@ -192,6 +211,7 @@ export function PlayerDrawer({
     setSeekTarget(null);
     setVolumePreview(null);
     setSubtitleMenuOpen(false);
+    setAudioMenuOpen(false);
 
     const timer = window.setTimeout(async () => {
       const element = videoRef.current;
@@ -231,6 +251,11 @@ export function PlayerDrawer({
       if (alignTimer) window.clearTimeout(alignTimer);
     };
   }, [episode.id, entered, syncVideoRect]);
+
+  useEffect(() => {
+    subtitleDelayRef.current = 0;
+    setSubtitleDelayMs(0);
+  }, [episode.id]);
 
   // 订阅播放状态。
   useEffect(() => {
@@ -279,7 +304,11 @@ export function PlayerDrawer({
     let unlisten: UnlistenFn | undefined;
 
     onPlayerMouseActivity(() => {
-      if (!disposed) setActivityTick((tick) => tick + 1);
+      if (!disposed) {
+        setActivityTick((tick) => tick + 1);
+        // 只有鼠标移动才主动唤出控制栏；空格播放/暂停不应唤出。
+        setControlsVisible(true);
+      }
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -291,25 +320,46 @@ export function PlayerDrawer({
     };
   }, []);
 
-  // 全屏时鼠标静止 2.5 秒收起控制栏（暂停时同样收起）；
-  // 字幕面板打开期间保持显示。
+  // 原生视频窗口上的单击由后端轮询鼠标发出；和下方黑边一样只收起控制栏。
   useEffect(() => {
-    if (!fullscreen) {
-      setControlsVisible(true);
-      return;
-    }
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
 
-    setControlsVisible(true);
+    onPlayerClick(() => {
+      if (!disposed) hideControls();
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [hideControls]);
+
+  // 全屏时鼠标静止 2.5 秒收起控制栏；窗口模式只在点击画面时收起。
+  // 控制栏已经隐藏时不再因为暂停/播放等状态变化重新出现。
+  useEffect(() => {
+    if (!controlsVisible) return;
+    if (!fullscreen) return;
+
     const timer = window.setTimeout(() => {
-      if (!subtitleMenuOpen) {
+      if (!subtitleMenuOpen && !audioMenuOpen) {
         setSubtitleMenuOpen(false);
+        setAudioMenuOpen(false);
         setControlsVisible(false);
       }
     }, 2500);
 
     return () => window.clearTimeout(timer);
-    // 暂停/继续会重置计时，操作后仍有 2.5 秒再收起。
-  }, [fullscreen, activityTick, subtitleMenuOpen, playerState?.paused]);
+  }, [
+    fullscreen,
+    activityTick,
+    subtitleMenuOpen,
+    audioMenuOpen,
+    controlsVisible,
+  ]);
 
   // 全屏收起控制栏时一并隐藏鼠标指针；重新出现或退出时恢复。
   useEffect(() => {
@@ -419,6 +469,16 @@ export function PlayerDrawer({
     currentSubtitle?.lang ||
     (currentSubtitle ? `字幕 ${currentSubtitle.id}` : null);
   const hasSubtitles = subtitleTracks.length > 0;
+  const subtitleDelayLabel = `${
+    subtitleDelayMs > 0 ? "+" : ""
+  }${(subtitleDelayMs / 1000).toFixed(1)}s`;
+
+  const audioTracks = playerState?.audioTracks ?? [];
+  const audioId = playerState?.audioId ?? null;
+  const currentAudio =
+    audioTracks.find((track) => track.id === audioId) ?? null;
+  const audioLabel = currentAudio ? audioTrackLabel(currentAudio) : null;
+  const hasAudio = audioTracks.length > 0;
 
   const currentIndex = episodes.findIndex((item) => item.id === episode.id);
   const previous = currentIndex > 0 ? episodes[currentIndex - 1] : null;
@@ -452,18 +512,51 @@ export function PlayerDrawer({
     seekTo(target);
   };
 
-  const closeSubtitleMenu = () => setSubtitleMenuOpen(false);
+  const closeMenus = () => {
+    setSubtitleMenuOpen(false);
+    setAudioMenuOpen(false);
+  };
 
   const selectSubtitle = (id: number | null) => {
-    closeSubtitleMenu();
+    // 切换轨道后保留字幕面板，方便继续调时间或换另一条字幕。
+    setAudioMenuOpen(false);
     void playerSetSubtitle(id);
+  };
+
+  const selectAudio = (id: number) => {
+    closeMenus();
+    void playerSetAudio(id);
+  };
+
+  const adjustSubtitleDelay = (deltaMs: number) => {
+    const next = Math.max(
+      -60_000,
+      Math.min(60_000, subtitleDelayRef.current + deltaMs),
+    );
+    subtitleDelayRef.current = next;
+    setSubtitleDelayMs(next);
+    void playerSetSubDelay(next / 1000);
+  };
+
+  const resetSubtitleDelay = () => {
+    subtitleDelayRef.current = 0;
+    setSubtitleDelayMs(0);
+    void playerSetSubDelay(0);
   };
 
   // 字幕选项直接展开在控制栏内部，和进度条一样是普通网页控件，
   // 不会覆盖原生视频窗口，也不需要任何截图。
   const toggleSubtitleMenu = () => {
     if (!playerState) return;
+    setAudioMenuOpen(false);
     setSubtitleMenuOpen((open) => !open);
+  };
+
+  // 音轨切换沿用字幕的交互：按钮在控制栏内，展开后显示轨道 chip。
+  const toggleAudioMenu = () => {
+    if (!playerState || !hasAudio) return;
+    setSubtitleMenuOpen(false);
+    setAudioMenuOpen((open) => !open);
   };
 
   // 播放器回报的位置接近目标后，进度条才恢复跟随实时进度。
@@ -680,7 +773,7 @@ export function PlayerDrawer({
         flipFrameRef.current = null;
       }
     };
-  }, [fullscreen, controlsVisible, subtitleMenuOpen]);
+  }, [fullscreen, controlsVisible, subtitleMenuOpen, audioMenuOpen]);
 
   // 键盘快捷键
   useEffect(() => {
@@ -688,9 +781,9 @@ export function PlayerDrawer({
       const tag = (event.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
 
-      if (event.key === "Escape" && subtitleMenuOpen) {
+      if (event.key === "Escape" && (subtitleMenuOpen || audioMenuOpen)) {
         event.preventDefault();
-        closeSubtitleMenu();
+        closeMenus();
       } else if (event.key === "Escape") {
         if (fullscreen) {
           void toggleFullscreen();
@@ -700,6 +793,12 @@ export function PlayerDrawer({
       } else if (event.key === " ") {
         event.preventDefault();
         togglePlay();
+        // 空格播放/暂停后立即收起控制栏；鼠标移动会把控制栏重新唤出。
+        if (fullscreen) {
+          setSubtitleMenuOpen(false);
+          setAudioMenuOpen(false);
+          setControlsVisible(false);
+        }
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         seekTo(Math.max(0, positionMs - 5000));
@@ -775,7 +874,7 @@ export function PlayerDrawer({
 
         <div
           ref={videoRef}
-          onClick={togglePlay}
+          onClick={hideControls}
           className={`relative w-full bg-black ${
             fullscreen ? "min-h-0 flex-1" : "aspect-video shrink-0"
           }`}
@@ -797,65 +896,136 @@ export function PlayerDrawer({
         <div
           ref={controlsRef}
           className={`grid shrink-0 ${
-            fullscreen && !controlsVisible ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
+            !controlsVisible ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
           }`}
         >
           <div
             className={`overflow-hidden ${
-              fullscreen && !controlsVisible ? "pointer-events-none" : ""
+              !controlsVisible ? "pointer-events-none" : ""
             }`}
           >
             <div
               className={`border-b border-neutral-800 bg-neutral-900/60 px-4 py-3 ${
-                fullscreen && !controlsVisible ? "opacity-0" : "opacity-100"
+                !controlsVisible ? "opacity-0" : "opacity-100"
               }`}
             >
               <div
                 className={`grid ${
-                  subtitleMenuOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                  subtitleMenuOpen || audioMenuOpen
+                    ? "grid-rows-[1fr]"
+                    : "grid-rows-[0fr]"
                 }`}
               >
                 <div className="overflow-hidden">
-                  <div
-                    className={`mb-3 flex flex-wrap items-center gap-2 border-b border-neutral-800 pb-3 ${
-                      subtitleMenuOpen
-                        ? "opacity-100"
-                        : "pointer-events-none opacity-0"
-                    }`}
-                  >
-                  <span className="mr-1 text-[10px] uppercase tracking-widest text-neutral-500">
-                    字幕
-                  </span>
+                  {subtitleMenuOpen && (
+                    <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-neutral-800 pb-3">
+                      <span className="mr-1 text-[10px] uppercase tracking-widest text-neutral-500">
+                        字幕
+                      </span>
 
-                  {subtitleTracks.length === 0 ? (
-                    <span className="text-xs text-neutral-500">该视频没有字幕</span>
-                  ) : (
-                    <>
-                      <SubtitleChip
-                        label="关闭字幕"
-                        selected={!subtitleOn}
-                        onClick={() => selectSubtitle(null)}
-                      />
+                      {subtitleTracks.length === 0 ? (
+                        <span className="text-xs text-neutral-500">
+                          该视频没有字幕
+                        </span>
+                      ) : (
+                        <>
+                          <TrackChip
+                            label="关闭字幕"
+                            selected={!subtitleOn}
+                            onClick={() => selectSubtitle(null)}
+                          />
 
-                      {subtitleTracks.map((track) => (
-                        <SubtitleChip
-                          key={track.id}
-                          label={track.title || track.lang || `字幕 ${track.id}`}
-                          selected={subtitleOn && track.id === subtitleId}
-                          onClick={() => selectSubtitle(track.id)}
-                        />
-                      ))}
-                    </>
+                          {subtitleTracks.map((track) => (
+                            <TrackChip
+                              key={track.id}
+                              label={
+                                track.title ||
+                                track.lang ||
+                                `字幕 ${track.id}`
+                              }
+                              selected={subtitleOn && track.id === subtitleId}
+                              onClick={() => selectSubtitle(track.id)}
+                            />
+                          ))}
+                        </>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={closeMenus}
+                        className="ml-auto text-[11px] text-neutral-400 transition-colors hover:text-neutral-200"
+                      >
+                        收起
+                      </button>
+
+                      {hasSubtitles && (
+                        <div className="mt-2 flex w-full flex-wrap items-center gap-2 border-t border-neutral-800 pt-2">
+                          <span className="text-[10px] uppercase tracking-widest text-neutral-500">
+                            字幕时间
+                          </span>
+                          <button
+                            type="button"
+                            title="字幕提前 0.1 秒"
+                            aria-label="字幕提前 0.1 秒"
+                            onClick={() => adjustSubtitleDelay(-100)}
+                            className="flex w-7 items-center justify-center rounded bg-neutral-800 px-2 py-1 text-sm leading-none text-neutral-300 transition-colors hover:bg-neutral-700"
+                          >
+                            -
+                          </button>
+                          <span className="min-w-12 text-center text-xs tabular-nums text-neutral-200">
+                            {subtitleDelayLabel}
+                          </span>
+                          <button
+                            type="button"
+                            title="字幕延后 0.1 秒"
+                            aria-label="字幕延后 0.1 秒"
+                            onClick={() => adjustSubtitleDelay(100)}
+                            className="flex w-7 items-center justify-center rounded bg-neutral-800 px-2 py-1 text-sm leading-none text-neutral-300 transition-colors hover:bg-neutral-700"
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            onClick={resetSubtitleDelay}
+                            className="text-[11px] text-neutral-400 transition-colors hover:text-neutral-200"
+                          >
+                            复位
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={closeSubtitleMenu}
-                    className="ml-auto text-[11px] text-neutral-400 transition-colors hover:text-neutral-200"
-                  >
-                    收起
-                  </button>
-                  </div>
+                  {audioMenuOpen && (
+                    <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-neutral-800 pb-3">
+                      <span className="mr-1 text-[10px] uppercase tracking-widest text-neutral-500">
+                        音轨
+                      </span>
+
+                      {audioTracks.length === 0 ? (
+                        <span className="text-xs text-neutral-500">
+                          该视频没有可切换的音轨
+                        </span>
+                      ) : (
+                        audioTracks.map((track) => (
+                          <TrackChip
+                            key={track.id}
+                            label={audioTrackLabel(track)}
+                            selected={track.id === audioId}
+                            onClick={() => selectAudio(track.id)}
+                          />
+                        ))
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={closeMenus}
+                        className="ml-auto text-[11px] text-neutral-400 transition-colors hover:text-neutral-200"
+                      >
+                        收起
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -960,6 +1130,24 @@ export function PlayerDrawer({
                       </option>
                     ))}
                   </select>
+
+                  <button
+                    type="button"
+                    onClick={toggleAudioMenu}
+                    disabled={!playerState || !hasAudio}
+                    className={`${iconButton} ${
+                      audioMenuOpen
+                        ? "bg-neutral-800 text-white"
+                        : ""
+                    }`}
+                    title={
+                      hasAudio
+                        ? `音轨（当前：${audioLabel ?? "未知"}）`
+                        : "音轨"
+                    }
+                  >
+                    <AudioLines size={16} />
+                  </button>
 
                   <button
                     type="button"

@@ -132,6 +132,32 @@ pub fn player_set_subtitle(
     .map_err(to_message)
 }
 
+/// 正数让字幕整体延后，负数让字幕提前；单位秒。
+#[tauri::command]
+pub fn player_set_sub_delay(
+    app: AppHandle,
+    seconds: f64,
+) -> Result<(), String> {
+    let seconds = seconds.clamp(-60.0, 60.0);
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "sub-delay", seconds] }),
+    )
+    .map_err(to_message)
+}
+
+#[tauri::command]
+pub fn player_set_audio(
+    app: AppHandle,
+    audio_id: i64,
+) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "aid", audio_id] }),
+    )
+    .map_err(to_message)
+}
+
 #[tauri::command]
 pub fn list_recent(
     state: State<'_, AppState>,

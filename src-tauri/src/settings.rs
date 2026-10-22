@@ -32,6 +32,9 @@ pub struct Settings {
     /// 是否监听目录变化并自动同步。
     #[serde(default = "default_auto_watch")]
     pub auto_watch: bool,
+    /// 是否在 Windows 登录后自动启动。
+    #[serde(default)]
+    pub auto_start: bool,
     /// 生成缩略图时的目标宽度。
     #[serde(default = "default_thumbnail_width")]
     pub thumbnail_width: u32,
@@ -97,6 +100,7 @@ impl Default for Settings {
         Self {
             library_root: None,
             auto_watch: default_auto_watch(),
+            auto_start: false,
             thumbnail_width: default_thumbnail_width(),
             page_transition: default_page_transition(),
             series_transition: default_series_transition(),
@@ -187,6 +191,7 @@ mod tests {
         let settings = load(&dir).unwrap();
         assert_eq!(settings.library_root.as_deref(), Some("X:\\番"));
         assert!(settings.auto_watch);
+        assert!(!settings.auto_start);
         assert_eq!(settings.thumbnail_width, 480);
         assert_eq!(settings.page_transition, PAGE_TRANSITION_FADE);
         assert_eq!(settings.series_transition, SERIES_TRANSITION_RISE);
@@ -203,6 +208,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
@@ -217,6 +223,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
@@ -238,6 +245,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
@@ -252,6 +260,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
@@ -273,6 +282,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_SLIDE.to_string(),
@@ -287,6 +297,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 480,
                 page_transition: "unknown".to_string(),
@@ -308,6 +319,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: false,
                 thumbnail_width: 5000,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
@@ -322,6 +334,7 @@ mod tests {
             &dir,
             &Settings {
                 library_root: None,
+                auto_start: false,
                 auto_watch: true,
                 thumbnail_width: 1,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),

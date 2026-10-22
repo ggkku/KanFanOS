@@ -27,7 +27,8 @@ pub async fn probe(path: &str) -> Result<ProbeData> {
             .output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("ffprobe 超时"))??;
+    .map_err(|_| anyhow::anyhow!("ffprobe 超时"))?
+    .context("启动 ffprobe 失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

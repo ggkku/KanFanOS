@@ -139,8 +139,9 @@ ffprobe -version
 3. 把 `C:\Tools\ffmpeg\bin` 加入系统 PATH（`Win + R` → `sysdm.cpl` → 高级 → 环境变量 → Path → 新建）
 4. 重开终端后验证
 
-> **开发阶段**用 PATH 里的系统 FFmpeg 即可，不必放进项目。
-> **打包分发阶段**涉及 GPL/LGPL 许可问题，那时再决定是否内置到 `resources/media-tools/`，并替换为许可明确的构建版本（详见设计文档 §11.1）。
+> **开发阶段**直接用 PATH 里的系统 FFmpeg 即可。
+> **打包时** `pnpm sidecars` 会把 `ffmpeg.exe` / `ffprobe.exe` 复制到 `src-tauri/binaries/`，
+> 作为 sidecar 随安装包分发，目标机器不需要再安装。分发前请确认 GPL 许可义务（详见设计文档 §11.1）。
 
 ---
 
@@ -178,6 +179,11 @@ mpv --version
 5. 重开终端验证
 
 > 第 5 步播放器功能会用到。如果暂时不做到那一步，可以跳过，不影响前 4 步开发。
+>
+> **打包时** `pnpm sidecars` 会从 `C:\Program Files\MPV Player\`（或 PATH）复制
+> `mpv.exe` 和 `d3dcompiler_43.dll` 到 `src-tauri/binaries/`，安装包会内置这两个文件。
+> 因此上面手动改 PATH 只是为了在开发终端里直接运行 `mpv`；打包后的程序优先使用
+> 安装目录里的副本，找不到时才回退到 PATH。
 
 ---
 

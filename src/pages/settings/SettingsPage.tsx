@@ -20,11 +20,13 @@ import {
   getCacheStats,
   getLibraryStats,
   quitApp,
+  setAutoStart,
   setAutoWatch,
   setPageTransition,
   setSeriesTransition,
   setThumbnailWidth,
   setWindowMode,
+  startMediaProcessing,
 } from "../../api/library";
 import { errorMessage } from "../../lib/errors";
 import type {
@@ -147,6 +149,18 @@ export function SettingsPage({
     }
   };
 
+  const toggleAutoStart = async () => {
+    if (!settings) return;
+    setError(null);
+
+    try {
+      const next = await setAutoStart(!settings.autoStart);
+      onSettingsChange(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
   const changeWidth = async (width: number) => {
     setError(null);
 
@@ -201,7 +215,7 @@ export function SettingsPage({
 
   const clearCache = async () => {
     const confirmed = await ask(
-      "清理缩略图缓存？\n缓存会在下次启动或重新扫描时自动重建。",
+      "清理缩略图缓存？\n清理后会立即重新生成所有视频的缩略图和时长。",
       {
         title: "清理缓存",
         kind: "warning",
@@ -219,6 +233,17 @@ export function SettingsPage({
       const nextCache = await getCacheStats();
       setCache(nextCache);
       onCacheCleared();
+
+      // 清理会重置所有未失效视频的媒体任务（包括以往因缺工具失败的任务），
+      // 立即开始重建，不必等下次启动。
+      if (settings?.libraryId != null) {
+        try {
+          await startMediaProcessing(settings.libraryId);
+        } catch (err) {
+          const message = errorMessage(err);
+          if (!message.includes("已在进行中")) throw err;
+        }
+      }
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -294,6 +319,25 @@ export function SettingsPage({
         </div>
 
         <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <Power size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">
+            开机自启动
+          </div>
+          <div className="min-w-0 flex-1 text-xs text-neutral-300">
+            {settings?.autoStart
+              ? "已开启 · 登录 Windows 后自动启动"
+              : "已关闭 · 需要手动启动"}
+          </div>
+          <button
+            type="button"
+            onClick={() => void toggleAutoStart()}
+            className={actionButton}
+          >
+            {settings?.autoStart ? "关闭" : "开启"}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
           <Image size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">
             缩略图宽度
@@ -364,10 +408,11 @@ export function SettingsPage({
           <button
             type="button"
             onClick={() => void clearCache()}
-            disabled={clearing || cache == null || cache.files === 0}
+            disabled={clearing || cache == null}
+            title="清空缩略图并重新生成所有视频的缩略图和时长"
             className={actionButton}
           >
-            {clearing ? "清理中…" : "清理"}
+            {clearing ? "清理中…" : "清理并重建"}
           </button>
         </div>
 
@@ -391,7 +436,7 @@ export function SettingsPage({
               : "读取中…"
           }
         />
-        <InfoRow icon={Info} label="版本" value="KanFanOS 0.1.0" />
+        <InfoRow icon={Info} label="版本" value="KanFanOS 0.1.1" />
       </section>
 
       {error && (

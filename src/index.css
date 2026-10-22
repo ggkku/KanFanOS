@@ -130,6 +130,25 @@ textarea,
   }
 }
 
+/* 「其他视频」二级选集：右侧滑入 / 左侧滑出 */
+@keyframes extras-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes extras-out-right {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
 /* 打开番剧进入选集页的过渡 */
 @keyframes detail-in-rise {
   from {
@@ -278,6 +297,18 @@ textarea,
 
 .animate-page-slide-out-up {
   animation: page-slide-out-up 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-extras-in-right {
+  animation: extras-in-right 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-extras-out-right {
+  animation: extras-out-right 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.clip-x {
+  overflow-x: clip;
 }
 
 ::-webkit-scrollbar {

@@ -19,7 +19,6 @@ interface CategoryPageProps {
   loadingMore: boolean;
   scanning: boolean;
   sort: SeriesSort;
-  dataRoot: string | null;
   onSortChange: (sort: SeriesSort) => void;
   onOpenSeries: (series: SeriesSummary, coverRect: DOMRect | null) => void;
   onRescan: () => void;
@@ -34,7 +33,6 @@ export function CategoryPage({
   loadingMore,
   scanning,
   sort,
-  dataRoot,
   onSortChange,
   onOpenSeries,
   onRescan,
@@ -86,7 +84,7 @@ export function CategoryPage({
               <SeriesCard
                 key={item.id}
                 series={item}
-                coverUrl={seriesCoverUrl(item, dataRoot)}
+                coverUrl={seriesCoverUrl(item)}
                 onOpen={(rect) => onOpenSeries(item, rect)}
               />
             ))}

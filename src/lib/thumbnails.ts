@@ -12,20 +12,16 @@ export function thumbnailUrl(
 interface SeriesCoverSource {
   coverPath: string | null;
   coverVersion: number | null;
-  coverKey: string | null;
 }
 
-/// 优先使用番剧文件夹内的封面，其次使用第一集缩略图。
-export function seriesCoverUrl(
-  series: SeriesCoverSource,
-  dataRoot: string | null,
-): string | null {
-  if (series.coverPath) {
-    const base = convertFileSrc(series.coverPath);
-    // 加上修改时间，封面文件替换后可以绕过浏览器缓存。
-    return series.coverVersion != null
-      ? `${base}?v=${series.coverVersion}`
-      : base;
-  }
-  return thumbnailUrl(dataRoot, series.coverKey);
+/// 番剧封面只使用番剧文件夹内配置的封面图片；
+/// 不再自动拿第一集缩略图顶替，没有封面时由卡片显示番剧名首字占位。
+export function seriesCoverUrl(series: SeriesCoverSource): string | null {
+  if (!series.coverPath) return null;
+
+  const base = convertFileSrc(series.coverPath);
+  // 加上修改时间，封面文件替换后可以绕过浏览器缓存。
+  return series.coverVersion != null
+    ? `${base}?v=${series.coverVersion}`
+    : base;
 }

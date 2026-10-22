@@ -17,6 +17,7 @@ use crate::{
     database::videos::MediaJob,
     state::AppState,
     time::now_ms,
+    tools,
 };
 
 /// 同时运行的 FFprobe/FFmpeg 进程上限。
@@ -40,7 +41,7 @@ pub struct MediaProgress {
 
 pub(crate) fn command(program: &str) -> tokio::process::Command {
     #[allow(unused_mut)]
-    let mut command = tokio::process::Command::new(program);
+    let mut command = tokio::process::Command::new(tools::resolve(program));
 
     #[cfg(windows)]
     {
@@ -77,14 +78,32 @@ pub fn start(app: AppHandle, library_id: i64) -> Result<()> {
             bail!("媒体处理已在进行中");
         }
         state.db.reset_media_processing()?;
+
+        // 安装包补上 FFprobe/FFmpeg 后，上次因缺工具而三连失败的任务要重新
+        // 入队，否则它们会永远停在 failed，视频也就永远没有时长和缩略图。
+        if tools::available("ffprobe") && tools::available("ffmpeg") {
+            match state.db.requeue_failed_media(library_id) {
+                Ok(0) => {}
+                Ok(requeued) => log(
+                    &state,
+                    &format!("重新排队 {requeued} 个因缺少工具而失败的任务"),
+                ),
+                Err(error) => log(&state, &format!("重新排队失败任务出错: {error:#}")),
+            }
+        } else {
+            log(
+                &state,
+                "未找到 ffprobe/ffmpeg（安装目录 sidecar 和 PATH 都没有），缩略图与时长无法生成；失败任务暂不重试",
+            );
+        }
     }
 
     tauri::async_runtime::spawn(async move {
         let _guard = MediaGuard { app: app.clone() };
 
         if let Err(error) = run(&app, library_id).await {
-            eprintln!("媒体处理失败: {error:#}");
             let state = app.state::<AppState>();
+            log(&state, &format!("媒体处理异常结束: {error:#}"));
             let _ = state.db.reset_media_processing();
         }
     });
@@ -121,6 +140,12 @@ async fn run(app: &AppHandle, library_id: i64) -> Result<()> {
             tasks.spawn(async move {
                 let state = app.state::<AppState>();
                 let result = process_job(state.inner(), &job).await;
+                if let Err(error) = &result {
+                    log(
+                        state.inner(),
+                        &format!("处理失败 {}: {error:#}", job.path),
+                    );
+                }
                 drop(permit);
                 (job.id, result)
             });
@@ -135,10 +160,16 @@ async fn run(app: &AppHandle, library_id: i64) -> Result<()> {
                     if let Err(record_error) =
                         state.db.mark_media_failed(id, &format!("{error:#}"))
                     {
-                        eprintln!("记录媒体任务失败状态出错: {record_error:#}");
+                        log(
+                            state.inner(),
+                            &format!("记录媒体任务失败状态出错: {record_error:#}"),
+                        );
                     }
                 }
-                Err(error) => eprintln!("媒体任务异常: {error}"),
+                Err(error) => {
+                    let state = app.state::<AppState>();
+                    log(state.inner(), &format!("媒体任务异常: {error}"));
+                }
             }
 
             emit(app, library_id, "processing", processed, failed, total);
@@ -146,6 +177,13 @@ async fn run(app: &AppHandle, library_id: i64) -> Result<()> {
     }
 
     let cancelled = state.media.is_cancelled();
+    log(
+        &state,
+        &format!(
+            "处理结束：成功 {processed}，失败 {failed}，取消 {}",
+            if cancelled { "是" } else { "否" }
+        ),
+    );
     emit(
         app,
         library_id,
@@ -196,6 +234,26 @@ fn emit(
             total,
         },
     );
+}
+
+/// 后台任务在 release 里没有控制台，错误必须落到日志文件，
+/// 否则缩略图/时长缺失时用户完全看不到原因。
+fn log(state: &AppState, message: &str) {
+    use std::io::Write;
+
+    let dir = state.data_root.join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let path = dir.join("media.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "[{}] {message}", now_ms());
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +328,7 @@ mod tests {
                 extension: "mp4".to_string(),
                 file_size: metadata.len() as i64,
                 modified_at: None,
+                kind: "main".to_string(),
             }],
             now_ms(),
         )

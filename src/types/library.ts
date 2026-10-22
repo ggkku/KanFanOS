@@ -24,10 +24,12 @@ export interface AppSettings {
   libraryId: number | null;
   dataRoot: string;
   autoWatch: boolean;
+  autoStart: boolean;
   thumbnailWidth: number;
   pageTransition: PageTransition;
   seriesTransition: SeriesTransition;
   windowMode: WindowMode;
+  toolsReady: boolean;
 }
 
 export interface CacheStats {
@@ -58,6 +60,7 @@ export interface SeriesSummary {
   coverKey: string | null;
   coverPath: string | null;
   coverVersion: number | null;
+  watchCount: number;
 }
 
 export interface SeriesPage {
@@ -115,6 +118,12 @@ export interface SubtitleTrack {
   lang: string;
 }
 
+export interface AudioTrack {
+  id: number;
+  title: string;
+  lang: string;
+}
+
 export interface PlayerState {
   episodeId: number;
   positionMs: number;
@@ -127,6 +136,8 @@ export interface PlayerState {
   subtitles: SubtitleTrack[];
   subtitleId: number | null;
   subtitlesVisible: boolean;
+  audioTracks: AudioTrack[];
+  audioId: number | null;
 }
 
 export interface PlayerStarted {

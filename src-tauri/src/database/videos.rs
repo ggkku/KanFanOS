@@ -12,6 +12,8 @@ pub struct ScannedFile {
     pub extension: String,
     pub file_size: i64,
     pub modified_at: Option<i64>,
+    /// `main` = 番剧根目录；`extra` = 子文件夹里的 CM/PV/特典。
+    pub kind: String,
 }
 
 /// 同一路径只保留一条记录；文件大小或修改时间变化时清空派生元数据，
@@ -19,14 +21,15 @@ pub struct ScannedFile {
 const UPSERT_VIDEO: &str = r#"
 INSERT INTO videos (
     path, filename, extension, file_size, modified_at,
-    status, library_id, series_id, created_at, updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?8)
+    status, library_id, series_id, created_at, updated_at, kind
+) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?8, ?9)
 ON CONFLICT(path) DO UPDATE SET
     filename   = excluded.filename,
     extension  = excluded.extension,
     status     = 'active',
     library_id = COALESCE(videos.library_id, excluded.library_id),
     series_id  = excluded.series_id,
+    kind       = excluded.kind,
     file_size  = excluded.file_size,
     modified_at = excluded.modified_at,
     updated_at = excluded.updated_at,
@@ -127,6 +130,7 @@ impl Database {
                     library_id,
                     file.series_id,
                     now,
+                    file.kind,
                 ])?;
             }
         }
@@ -219,6 +223,37 @@ impl Database {
         Ok(())
     }
 
+    /// 把因外部工具不可用而耗尽重试的任务重新放回队列。
+    ///
+    /// 典型场景：旧安装包没有内置 FFprobe/FFmpeg，扫描时所有任务都会失败并
+    /// 停在 `failed`；补上工具后必须重新排队，否则这些视频永远没有时长和
+    /// 缩略图（`claim_media_jobs` 只领取 `pending`）。
+    ///
+    /// 不重排 `ffprobe 失败: ...` / `ffmpeg 失败: ...`：这两个前缀说明工具
+    /// 已经运行，只是文件本身无法解析，每次启动重试没有意义。旧版本在
+    /// FFprobe 缺失时只记录原始 IO 错误（如 `(os error 2)`），所以其余
+    /// 错误都视为「工具没跑起来」。
+    pub fn requeue_failed_media(&self, library_id: i64) -> Result<usize> {
+        let updated = self.conn()?.execute(
+            "UPDATE videos
+                SET media_status = 'pending',
+                    media_attempts = 0,
+                    media_error = NULL
+              WHERE library_id = ?1
+                AND status <> 'missing'
+                AND media_status = 'failed'
+                AND (
+                    media_error IS NULL
+                    OR (
+                        media_error NOT LIKE 'ffprobe 失败:%'
+                        AND media_error NOT LIKE 'ffmpeg 失败:%'
+                    )
+                )",
+            [library_id],
+        )?;
+        Ok(updated)
+    }
+
     pub fn save_probe(&self, id: i64, probe: &ProbeData, now: i64) -> Result<()> {
         self.conn()?.execute(
             "UPDATE videos
@@ -271,15 +306,64 @@ impl Database {
         Ok(())
     }
 
-    /// 清空缩略图引用，让视频重新排队生成。
+    /// 清空缩略图引用，让所有未失效的视频重新排队。
+    ///
+    /// 不能只重置 `thumbnail_key IS NOT NULL` 的记录：探测失败的任务从未写入
+    /// 缩略图键，却能停在三连失败里，只重置有键的行会让它们永远卡住。
     pub fn reset_thumbnails(&self) -> Result<usize> {
         let updated = self.conn()?.execute(
             "UPDATE videos
-                SET thumbnail_key = NULL, media_status = 'pending'
-              WHERE thumbnail_key IS NOT NULL",
+                SET thumbnail_key = NULL,
+                    media_status = 'pending',
+                    media_attempts = 0,
+                    media_error = NULL
+              WHERE status <> 'missing'",
             [],
         )?;
         Ok(updated)
+    }
+
+    /// 按文件实际所在目录修正 `kind`：番剧根目录 → main，子目录 → extra。
+    /// 旧数据库升级后没有 kind 语义，启动时跑一次即可让主选集/二级选集正确。
+    pub fn reclassify_video_kinds(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let rows = {
+            let mut stmt = conn.prepare(
+                "SELECT v.id, v.path, s.path
+                   FROM videos v
+                   JOIN series s ON s.id = v.series_id
+                  WHERE v.status <> 'missing'",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut changed = 0;
+        for (id, path, series_path) in rows {
+            let parent = std::path::Path::new(&path)
+                .parent()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            let kind = if normalize_path(&parent) == normalize_path(&series_path) {
+                "main"
+            } else {
+                "extra"
+            };
+
+            changed += conn.execute(
+                "UPDATE videos SET kind = ?2 WHERE id = ?1 AND kind <> ?2",
+                params![id, kind],
+            )?;
+        }
+
+        Ok(changed)
     }
 
     pub fn media_stats(&self, library_id: i64) -> Result<MediaStats> {
@@ -302,6 +386,10 @@ impl Database {
             },
         )?)
     }
+}
+
+fn normalize_path(path: &str) -> String {
+    path.replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 #[cfg(test)]
@@ -348,6 +436,7 @@ mod tests {
                 extension: "mp4".to_string(),
                 file_size: 1,
                 modified_at: Some(1),
+                kind: "main".to_string(),
             }],
             now_ms(),
         )
@@ -356,6 +445,77 @@ mod tests {
 
         assert!(db.remove_library(library.id).unwrap());
         assert_eq!(db.video_count().unwrap(), 0);
+
+        drop(db);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_media_jobs_are_requeued_and_cache_reset_retries_them() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kanfanos-db-media-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+
+        let db = Database::open(&dir.join("library.sqlite")).unwrap();
+        let library = db.add_library("X:\\fake", "fake", now_ms()).unwrap();
+        let series_id = db
+            .upsert_series(
+                library.id,
+                "未知时间",
+                "fake",
+                "X:\\fake\\series",
+                "",
+                None,
+                None,
+                now_ms(),
+            )
+            .unwrap();
+        db.upsert_videos(
+            library.id,
+            &[ScannedFile {
+                series_id,
+                path: "X:\\fake\\a.mp4".to_string(),
+                filename: "a.mp4".to_string(),
+                extension: "mp4".to_string(),
+                file_size: 1,
+                modified_at: Some(1),
+                kind: "main".to_string(),
+            }],
+            now_ms(),
+        )
+        .unwrap();
+
+        let job = db.claim_media_jobs(library.id, 10).unwrap().remove(0);
+        for _ in 0..3 {
+            db.mark_media_failed(job.id, "系统找不到指定的文件。 (os error 2)")
+                .unwrap();
+        }
+        assert_eq!(db.media_stats(library.id).unwrap().failed, 1);
+
+        // 补上 FFprobe/FFmpeg 后重新入队。
+        assert_eq!(db.requeue_failed_media(library.id).unwrap(), 1);
+        let stats = db.media_stats(library.id).unwrap();
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(db.claim_media_jobs(library.id, 10).unwrap().len(), 1);
+
+        // 文件本身损坏导致的重试耗尽不自动重排，否则每次启动都会重试。
+        for _ in 0..3 {
+            db.mark_media_failed(job.id, "ffprobe 失败: Invalid data found")
+                .unwrap();
+        }
+        assert_eq!(db.media_stats(library.id).unwrap().failed, 1);
+        assert_eq!(db.requeue_failed_media(library.id).unwrap(), 0);
+
+        // 手动清理缩略图缓存则必须把它放回队列，
+        // 即使这条记录从来没有 thumbnail_key。
+        assert_eq!(db.reset_thumbnails().unwrap(), 1);
+        let stats = db.media_stats(library.id).unwrap();
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.failed, 0);
 
         drop(db);
         let _ = fs::remove_dir_all(&dir);

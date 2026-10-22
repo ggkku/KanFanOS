@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,6 +8,7 @@ import { MediaBanner } from "./components/media/MediaBanner";
 import { PlayerDrawer } from "./components/player/PlayerDrawer";
 import { ScanBanner } from "./components/scan/ScanBanner";
 import { SeriesDetail } from "./components/series/SeriesDetail";
+import { SeriesExtras } from "./components/series/SeriesExtras";
 import { SetupScreen } from "./components/setup/SetupScreen";
 import { CategoryPage } from "./pages/category/CategoryPage";
 import { RecentPage } from "./pages/recent/RecentPage";
@@ -21,6 +22,7 @@ import {
   getSettings,
   listCategories,
   listEpisodes,
+  listExtraEpisodes,
   listRecent,
   listSeries,
   onLibrarySync,
@@ -58,20 +60,40 @@ function App() {
   const [pageTransition, setPageTransition] = useState<"down" | "up" | "fade">(
     "fade",
   );
-  const [outgoingPage, setOutgoingPage] = useState<ReactNode>(null);
+  const [outgoingView, setOutgoingView] = useState<{
+    page: ReactNode;
+    scrollTop: number;
+    rect: { top: number; left: number; width: number; height: number };
+    /// `undefined` 用当前页面退出动画；空字符串表示静态背景快照。
+    exitClass?: string | null;
+    behind: boolean;
+  } | null>(null);
   const outgoingTimer = useRef<number | null>(null);
+  const outgoingScrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<ReactNode>(null);
+  // 主滚动容器；打开选集页前记下位置，返回时恢复，
+  // 这样封面飞回的落点和离开时完全一致。
+  const scrollRef = useRef<HTMLElement>(null);
+  const savedScrollTopRef = useRef<number | null>(null);
+  // 新页面渲染后要设置的主滚动位置。
+  const pendingScrollTopRef = useRef<number | null>(null);
   // 打开番剧进入选集页的动画模式与封面飞入浮层。
   const [detailAnimation, setDetailAnimation] =
     useState<SeriesTransition>("rise");
   const [flipCover, setFlipCover] = useState<{
-    url: string;
+    url: string | null;
+    /// 没有手动封面时，浮层用番剧名首字占位，和卡片保持一致。
+    label: string;
     from: DOMRect;
     /// 返回时的目标位置（卡片封面）。飞入时由详情页封面提供。
     to?: DOMRect;
   } | null>(null);
   // 记住打开详情时卡片封面的位置，返回时封面飞回去。
-  const flipOriginRef = useRef<{ url: string; from: DOMRect } | null>(null);
+  const flipOriginRef = useRef<{
+    url: string | null;
+    label: string;
+    from: DOMRect;
+  } | null>(null);
   // 从选集页返回时使用的倒放动画。
   const [detailReturn, setDetailReturn] = useState<SeriesTransition | null>(
     null,
@@ -99,6 +121,10 @@ function App() {
     null,
   );
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
+  const [extraEpisodes, setExtraEpisodes] = useState<EpisodeSummary[]>([]);
+  const [extrasOpen, setExtrasOpen] = useState(false);
+  const [extrasClosing, setExtrasClosing] = useState(false);
+  const extrasTimer = useRef<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [seriesLoading, setSeriesLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -132,8 +158,13 @@ function App() {
           }
 
           // 上次未完成的元数据/缩略图任务继续处理。
+          // failed > 0 时也要启动一次：安装包补上 FFprobe/FFmpeg 后，
+          // 后端会把这些三连失败的任务重新排队。
           const media = await getMediaStats(nextSettings.libraryId);
-          if (!disposed && media.pending + media.processing > 0) {
+          const hasMediaWork =
+            media.pending + media.processing > 0 ||
+            (media.failed > 0 && nextSettings.toolsReady);
+          if (!disposed && hasMediaWork) {
             try {
               await startMediaProcessing(nextSettings.libraryId);
             } catch (err) {
@@ -369,7 +400,44 @@ function App() {
     return categories.length + 1;
   };
 
+  // 把当前页面快照固定到主滚动区域的大小，并按离开时的 scrollTop 显示。
+  // 这样整页滑动不会因为旧页面内容太长而溢出，也不会只显示列表顶部。
+  const showOutgoing = (
+    page: ReactNode,
+    duration: number,
+    options?: { exitClass?: string | null; behind?: boolean },
+  ) => {
+    const element = scrollRef.current;
+    if (!element || page == null) {
+      setOutgoingView(null);
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    setOutgoingView({
+      page,
+      scrollTop: element.scrollTop,
+      rect: {
+        top: rect.top,
+        left: rect.left,
+        width: element.clientWidth,
+        height: element.clientHeight,
+      },
+      exitClass: options?.exitClass,
+      behind: options?.behind ?? false,
+    });
+
+    if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
+    outgoingTimer.current = window.setTimeout(() => {
+      setOutgoingView(null);
+    }, duration);
+  };
+
   const navigate = (next: View) => {
+    savedScrollTopRef.current = null;
+    if (extrasTimer.current) window.clearTimeout(extrasTimer.current);
+    setExtrasClosing(false);
+
     const from = navIndex(view);
     const to = navIndex(next);
 
@@ -378,18 +446,18 @@ function App() {
       const direction = to > from ? "up" : "down";
       setPageTransition(direction);
       setDetailReturn(null);
-      // 用当前页面的元素做退出动画。
-      setOutgoingPage(contentRef.current);
-      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
-      const duration =
-        settings?.pageTransition === "slide" ? 360 : 260;
-      outgoingTimer.current = window.setTimeout(() => {
-        setOutgoingPage(null);
-      }, duration + 40);
+      const duration = settings?.pageTransition === "slide" ? 360 : 260;
+      showOutgoing(contentRef.current, duration + 40);
+    } else {
+      setOutgoingView(null);
     }
 
+    // 新页面从顶部开始；旧页面的滚动位置已经保存在 outgoingView 里。
+    pendingScrollTopRef.current = 0;
     setSelectedSeries(null);
     setEpisodes([]);
+    setExtraEpisodes([]);
+    setExtrasOpen(false);
     setQuery("");
     setFlipCover(null);
     flipOriginRef.current = null;
@@ -402,14 +470,9 @@ function App() {
     setDetailReturn(detailAnimation);
 
     if (content) {
-      setOutgoingPage(content);
-      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
-      // 只移除退场层，detailReturn 保留到下一次真正的页面切换，
-      // 否则它一变回 null，进入动画的 class 会改变并重播一次页面切换动画。
-      outgoingTimer.current = window.setTimeout(() => {
-        setOutgoingPage(null);
-      }, 340);
+      showOutgoing(content, 340);
     } else {
+      setOutgoingView(null);
       setDetailReturn(null);
     }
 
@@ -419,20 +482,72 @@ function App() {
       const rect = cover?.getBoundingClientRect();
       if (rect) {
         const origin = flipOriginRef.current;
-        setFlipCover({ url: origin.url, from: rect, to: origin.from });
+        setFlipCover({
+          url: origin.url,
+          label: origin.label,
+          from: rect,
+          to: origin.from,
+        });
       }
       flipOriginRef.current = null;
     }
 
+    // 返回后恢复离开时的滚动位置；必须在新页面提交后、封面飞回动画开始前完成。
+    pendingScrollTopRef.current = savedScrollTopRef.current ?? 0;
+    savedScrollTopRef.current = null;
+
     setSelectedSeries(null);
     setEpisodes([]);
+    setExtraEpisodes([]);
+    setExtrasOpen(false);
+    setExtrasClosing(false);
+    if (extrasTimer.current) window.clearTimeout(extrasTimer.current);
   };
+
+  // 进入「其他视频」：固定整块实心底色，从右侧滑入。
+  const openExtras = () => {
+    if (extrasTimer.current) window.clearTimeout(extrasTimer.current);
+    setExtrasClosing(false);
+    setExtrasOpen(true);
+  };
+
+  // 退出「其他视频」：同一块实心页面向右侧滑出，动画结束后再卸载。
+  const closeExtras = () => {
+    if (!extrasOpen || extrasClosing) return;
+    setExtrasClosing(true);
+    if (extrasTimer.current) window.clearTimeout(extrasTimer.current);
+    extrasTimer.current = window.setTimeout(() => {
+      setExtrasOpen(false);
+      setExtrasClosing(false);
+      extrasTimer.current = null;
+    }, 360);
+  };
+
+  // 新页面每次提交后应用一次待恢复的滚动位置。
+  // 没有依赖数组：只在 ref 有值时动作，且一定早于封面飞回动画的 rAF。
+  useLayoutEffect(() => {
+    const top = pendingScrollTopRef.current;
+    if (top == null) return;
+    pendingScrollTopRef.current = null;
+
+    const container = scrollRef.current;
+    if (container) container.scrollTop = top;
+  });
+
+  // 等旧页面快照渲染出来后再滚到离开时的位置。
+  useLayoutEffect(() => {
+    if (!outgoingView) return;
+    const container = outgoingScrollRef.current;
+    if (container) container.scrollTop = outgoingView.scrollTop;
+  }, [outgoingView]);
 
   const handleQueryChange = (value: string) => {
     setQuery(value);
     if (value.trim().length > 0) {
       setSelectedSeries(null);
       setEpisodes([]);
+      setExtraEpisodes([]);
+      setExtrasOpen(false);
     }
   };
 
@@ -569,6 +684,8 @@ function App() {
       setCategories(nextCategories);
       setSelectedSeries(null);
       setEpisodes([]);
+      setExtraEpisodes([]);
+      setExtrasOpen(false);
       setRefreshKey((value) => value + 1);
 
       setView((current) => {
@@ -650,24 +767,24 @@ function App() {
   const openSeries = async (
     target: SeriesSummary,
     coverRect?: DOMRect | null,
+    resumeVideoId?: number | null,
   ) => {
+    savedScrollTopRef.current = scrollRef.current?.scrollTop ?? null;
+
     const mode = settings?.seriesTransition ?? "rise";
     setDetailAnimation(mode);
 
-    // 旧页面退场。
-    if (contentRef.current) {
-      setOutgoingPage(contentRef.current);
-      if (outgoingTimer.current) window.clearTimeout(outgoingTimer.current);
-      outgoingTimer.current = window.setTimeout(() => {
-        setOutgoingPage(null);
-      }, 340);
-    }
+    // 旧页面固定成离开时可见的滚动快照，详情页从顶部进入。
+    showOutgoing(contentRef.current, 340);
+    pendingScrollTopRef.current = 0;
 
     // 封面飞入：先记下卡片封面在屏幕上的位置，详情页挂载后再算目标位置。
-    const coverUrl = seriesCoverUrl(target, settings?.dataRoot ?? null);
-    if (mode === "flip" && coverRect && coverUrl) {
-      flipOriginRef.current = { url: coverUrl, from: coverRect };
-      setFlipCover({ url: coverUrl, from: coverRect });
+    // 没有手动封面时用首字占位浮层，保证「封面飞入」动画仍然有效。
+    const coverUrl = seriesCoverUrl(target);
+    if (mode === "flip" && coverRect) {
+      const label = target.name.slice(0, 1);
+      flipOriginRef.current = { url: coverUrl, label, from: coverRect };
+      setFlipCover({ url: coverUrl, label, from: coverRect });
     } else {
       flipOriginRef.current = null;
       setFlipCover(null);
@@ -675,9 +792,33 @@ function App() {
     setDetailReturn(null);
 
     setSelectedSeries(target);
+    setExtrasOpen(false);
     try {
-      const rows = await listEpisodes(target.id);
-      setEpisodes(sortEpisodes(rows));
+      const [mainRows, extraRows] = await Promise.all([
+        listEpisodes(target.id),
+        listExtraEpisodes(target.id),
+      ]);
+      const sorted = sortEpisodes(mainRows);
+      const sortedExtras = sortEpisodes(extraRows);
+      setEpisodes(sorted);
+      setExtraEpisodes(sortedExtras);
+
+      if (resumeVideoId != null) {
+        const mainEpisode = sorted.find(
+          (row) => row.id === resumeVideoId,
+        );
+        if (mainEpisode) {
+          openPlayer(target, sorted, mainEpisode);
+        } else {
+          const extraEpisode = sortedExtras.find(
+            (row) => row.id === resumeVideoId,
+          );
+          if (extraEpisode) {
+            setExtrasOpen(true);
+            openPlayer(target, sortedExtras, extraEpisode);
+          }
+        }
+      }
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -707,26 +848,34 @@ function App() {
     setPlayerTarget({ series, episodes: list, episode });
   };
 
-  const playRecent = async (item: RecentItem) => {
+  const openRecentSeries = async (item: RecentItem) => {
     if (item.seriesId == null) {
       setError("该视频没有关联番剧");
       return;
     }
 
     try {
-      const [series, rows] = await Promise.all([
-        getSeries(item.seriesId),
-        listEpisodes(item.seriesId),
+      const series = await getSeries(item.seriesId);
+      await openSeries(series, null, item.videoId);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const refreshSelectedSeries = async () => {
+    if (!selectedSeries) return;
+
+    try {
+      const [series, mainRows, extraRows] = await Promise.all([
+        getSeries(selectedSeries.id),
+        listEpisodes(selectedSeries.id),
+        listExtraEpisodes(selectedSeries.id),
       ]);
-      const sorted = sortEpisodes(rows);
-      const episode = sorted.find((row) => row.id === item.videoId);
-
-      if (!episode) {
-        setError("找不到该剧集");
-        return;
-      }
-
-      openPlayer(series, sorted, episode);
+      setSelectedSeries(series);
+      setEpisodes(sortEpisodes(mainRows));
+      setExtraEpisodes(sortEpisodes(extraRows));
+      if (extraRows.length === 0) setExtrasOpen(false);
+      setRecentVersion((value) => value + 1);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -738,11 +887,7 @@ function App() {
     setRefreshKey((value) => value + 1);
 
     if (selectedSeries) {
-      void listEpisodes(selectedSeries.id)
-        .then((rows) => setEpisodes(sortEpisodes(rows)))
-        .catch(() => {
-          // 刷新失败不影响关闭播放器。
-        });
+      void refreshSelectedSeries();
     }
   };
 
@@ -759,13 +904,16 @@ function App() {
         series={selectedSeries}
         episodes={episodes}
         dataRoot={settings?.dataRoot ?? null}
-        coverUrl={seriesCoverUrl(selectedSeries, settings?.dataRoot ?? null)}
+        coverUrl={seriesCoverUrl(selectedSeries)}
+        extraCount={extraEpisodes.length}
         onBack={closeSeries}
         onPlay={(episode) => {
           if (selectedSeries) {
             openPlayer(selectedSeries, episodes, episode);
           }
         }}
+        onOpenExtras={openExtras}
+        onChanged={refreshSelectedSeries}
       />
     );
   } else if (settings?.libraryRoot == null) {
@@ -778,7 +926,6 @@ function App() {
         total={searchTotal}
         loading={searchLoading}
         loadingMore={searchLoadingMore}
-        dataRoot={settings?.dataRoot ?? null}
         onOpenSeries={(item, rect) => void openSeries(item, rect)}
         onLoadMore={() => void loadMoreSearch()}
       />
@@ -800,7 +947,7 @@ function App() {
         items={recentItems}
         loading={recentLoading}
         dataRoot={settings?.dataRoot ?? null}
-        onPlay={(item) => void playRecent(item)}
+        onPlay={(item) => void openRecentSeries(item)}
         onRefresh={() => setRecentVersion((value) => value + 1)}
       />
     );
@@ -817,7 +964,6 @@ function App() {
         loadingMore={loadingMore}
         scanning={scanning}
         sort={sort}
-        dataRoot={settings?.dataRoot ?? null}
         onSortChange={setSort}
         onOpenSeries={(item, rect) => void openSeries(item, rect)}
         onRescan={rescan}
@@ -982,6 +1128,7 @@ function App() {
         query={query}
         onQueryChange={handleQueryChange}
         onNavigate={navigate}
+        scrollRef={scrollRef}
       >
       {progress && <ScanBanner progress={progress} onCancel={() => void handleCancelScan()} />}
 
@@ -995,6 +1142,13 @@ function App() {
       {syncOffline && (
         <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-300">
           番剧目录当前不可访问，自动同步已暂停。请检查磁盘或网络位置是否已连接。
+        </div>
+      )}
+
+      {settings && !settings.toolsReady && (
+        <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-300">
+          未找到 FFprobe / FFmpeg，视频时长和缩略图无法生成。请确认安装目录中有
+          ffmpeg.exe 和 ffprobe.exe，或重新安装完整安装包。
         </div>
       )}
 
@@ -1016,44 +1170,98 @@ function App() {
         </div>
       )}
 
-        <div
-          className={`relative flex flex-1 flex-col ${
-            outgoingPage && isSlideTransition ? "overflow-hidden" : ""
-          }`}
-        >
-          {outgoingPage && (
-            <div
-              className={`pointer-events-none absolute inset-0 ${activeExitAnimation}`}
-              aria-hidden
-            >
-              {outgoingPage}
-            </div>
-          )}
-
+        <div className="relative flex flex-1 flex-col clip-x">
           <div
             key={viewKey}
-            className={`flex flex-1 flex-col ${activeEnterAnimation}`}
+            className={`relative z-10 flex flex-1 flex-col ${activeEnterAnimation}`}
           >
             {content}
           </div>
         </div>
       </AppShell>
 
-      {flipCover && (
-        <img
-          data-flip-cover
-          src={flipCover.url}
-          alt=""
-          className="pointer-events-none fixed z-[70] rounded-xl border border-neutral-800 object-cover"
-          style={{
-            left: flipCover.from.left,
-            top: flipCover.from.top,
-            width: flipCover.from.width,
-            height: flipCover.from.height,
-            transformOrigin: "top left",
-          }}
-        />
+      {extrasOpen && selectedSeries && (
+        <div className="pointer-events-none fixed inset-y-0 left-60 right-0 z-20 overflow-hidden">
+          <div
+            className={`h-full w-full overflow-y-auto bg-neutral-950 ${
+              extrasClosing
+                ? "pointer-events-none animate-extras-out-right"
+                : "pointer-events-auto animate-extras-in-right"
+            }`}
+          >
+            <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-5 px-8 py-8">
+              <SeriesExtras
+                series={selectedSeries}
+                episodes={extraEpisodes}
+                dataRoot={settings?.dataRoot ?? null}
+                coverUrl={seriesCoverUrl(selectedSeries)}
+                onBack={closeExtras}
+                onPlay={(episode) =>
+                  openPlayer(selectedSeries, extraEpisodes, episode)
+                }
+              />
+            </div>
+          </div>
+        </div>
       )}
+
+      {outgoingView && (
+        <div
+          className={`pointer-events-none fixed ${
+            outgoingView.behind ? "z-0" : "z-30"
+          } overflow-hidden ${
+            outgoingView.exitClass !== undefined
+              ? outgoingView.exitClass
+              : activeExitAnimation
+          }`}
+          style={{
+            top: outgoingView.rect.top,
+            left: outgoingView.rect.left,
+            width: outgoingView.rect.width,
+            height: outgoingView.rect.height,
+          }}
+          aria-hidden
+        >
+          <div ref={outgoingScrollRef} className="h-full overflow-hidden">
+            <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-5 px-8 py-8">
+              {outgoingView.page}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {flipCover &&
+        (flipCover.url ? (
+          <img
+            data-flip-cover
+            src={flipCover.url}
+            alt=""
+            className="pointer-events-none fixed z-[70] rounded-xl border border-neutral-800 object-cover"
+            style={{
+              left: flipCover.from.left,
+              top: flipCover.from.top,
+              width: flipCover.from.width,
+              height: flipCover.from.height,
+              transformOrigin: "top left",
+            }}
+          />
+        ) : (
+          <div
+            data-flip-cover
+            className="pointer-events-none fixed z-[70] flex items-center justify-center overflow-hidden rounded-xl border border-neutral-800 bg-gradient-to-br from-neutral-800 via-neutral-900 to-neutral-950"
+            style={{
+              left: flipCover.from.left,
+              top: flipCover.from.top,
+              width: flipCover.from.width,
+              height: flipCover.from.height,
+              transformOrigin: "top left",
+            }}
+          >
+            <span className="text-4xl font-semibold text-neutral-700">
+              {flipCover.label}
+            </span>
+          </div>
+        ))}
 
       {playerTarget && (
         <PlayerDrawer

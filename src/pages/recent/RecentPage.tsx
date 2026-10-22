@@ -32,7 +32,7 @@ export function RecentPage({
         <div>
           <h1 className="text-2xl font-semibold">最近观看</h1>
           <p className="mt-1 text-sm text-neutral-400">
-            按打开时间排序，点击继续播放。
+            每部番剧一条记录，点击进入选集页继续观看。
           </p>
         </div>
         <button
@@ -132,10 +132,10 @@ export function RecentPage({
                   >
                     <Play size={11} fill="currentColor" />
                     {item.completed
-                      ? "重新播放"
+                      ? "重新观看"
                       : item.lastPositionMs > 0
-                        ? "继续播放"
-                        : "播放"}
+                        ? "继续观看"
+                        : "观看"}
                   </button>
                 </div>
               </div>

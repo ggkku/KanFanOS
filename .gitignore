@@ -30,3 +30,6 @@ dist-ssr
 # tauri icon 顺带生成的移动端图标，本项目只面向 Windows
 src-tauri/icons/android/
 src-tauri/icons/ios/
+
+# 打包用的第三方可执行文件，体积较大，由 scripts/fetch-sidecars.mjs 生成
+/src-tauri/binaries/

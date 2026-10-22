@@ -394,6 +394,7 @@ fn scan_series(
         };
 
         let path = entry.path();
+        let is_root_file = path.parent().map(|parent| parent == dir).unwrap_or(false);
         ctx.push_file(
             ScannedFile {
                 series_id,
@@ -402,6 +403,7 @@ fn scan_series(
                 extension,
                 file_size: metadata.len().min(i64::MAX as u64) as i64,
                 modified_at: metadata.modified().ok().and_then(system_time_to_ms),
+                kind: if is_root_file { "main" } else { "extra" }.to_string(),
             },
             path,
         )?;
@@ -460,6 +462,7 @@ fn scan_loose_series(
                 extension,
                 file_size: metadata.len().min(i64::MAX as u64) as i64,
                 modified_at: metadata.modified().ok().and_then(system_time_to_ms),
+                kind: "main".to_string(),
             },
             &path,
         )?;
@@ -663,6 +666,38 @@ mod tests {
         let summary = scan_with_state(&state, library_id, &mut |_| {}).unwrap();
         assert!(summary.cancelled);
         assert_eq!(summary.missing, 0);
+
+        drop(state);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn separates_root_episodes_from_subfolder_extras() {
+        let root = test_dir("extras");
+        let _ = fs::remove_dir_all(&root);
+        let series_dir = root.join("2026年7月新番").join("测试番");
+        fs::create_dir_all(series_dir.join("PV")).unwrap();
+        fs::write(series_dir.join("第1集.mp4"), b"main").unwrap();
+        fs::write(series_dir.join("PV").join("特典.mp4"), b"extra").unwrap();
+
+        let (state, library_id) = open_state(&root);
+        let mut noop = |_| {};
+        scan_with_state(&state, library_id, &mut noop).unwrap();
+
+        let page = state
+            .db
+            .list_series_page(library_id, "2026年7月", "name", 100, 0)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let series = &page.items[0];
+        assert_eq!(series.episode_count, 1);
+
+        let main = state.db.list_episodes(series.id).unwrap();
+        let extras = state.db.list_extra_episodes(series.id).unwrap();
+        assert_eq!(main.len(), 1);
+        assert_eq!(main[0].filename, "第1集.mp4");
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].filename, "特典.mp4");
 
         drop(state);
         let _ = fs::remove_dir_all(&root);

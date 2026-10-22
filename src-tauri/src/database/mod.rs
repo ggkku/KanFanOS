@@ -47,6 +47,8 @@ impl Database {
             path: path.to_path_buf(),
         };
         db.migrate()?;
+        // 旧库升级后修正主选集/二级选集的分类。
+        db.reclassify_video_kinds()?;
         Ok(db)
     }
 

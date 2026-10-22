@@ -18,6 +18,7 @@ pub struct AppSettings {
     /// 应用数据根目录，前端用它拼接缩略图路径。
     pub data_root: String,
     pub auto_watch: bool,
+    pub auto_start: bool,
     pub thumbnail_width: u32,
     /// 页面切换动画：`fade` 或 `slide`。
     pub page_transition: String,
@@ -25,6 +26,8 @@ pub struct AppSettings {
     pub series_transition: String,
     /// 主窗口模式：`windowed` / `borderless`。
     pub window_mode: String,
+    /// FFprobe / FFmpeg 是否可用；前端据此提示缩略图与时长无法生成。
+    pub tools_ready: bool,
 }
 
 #[tauri::command]
@@ -93,6 +96,24 @@ pub fn set_auto_watch(
     } else {
         watcher::stop(&app);
     }
+
+    to_app_settings(state.inner(), settings)
+}
+
+#[tauri::command]
+pub fn set_auto_start(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppSettings, String> {
+    // 调试模式不写注册表，避免把 target\debug\kanfanos.exe 注册成开机启动；
+    // 配置仍会保存，打包版启动时按配置同步到注册表。
+    if !cfg!(debug_assertions) {
+        crate::autostart::set_enabled(enabled).map_err(to_message)?;
+    }
+
+    let mut settings = settings::load(&state.data_root).map_err(to_message)?;
+    settings.auto_start = enabled;
+    settings::save(&state.data_root, &settings).map_err(to_message)?;
 
     to_app_settings(state.inner(), settings)
 }
@@ -206,10 +227,12 @@ fn to_app_settings(state: &AppState, settings: Settings) -> Result<AppSettings, 
         library_id,
         data_root: state.data_root.display().to_string(),
         auto_watch: settings.auto_watch,
+        auto_start: settings.auto_start,
         thumbnail_width: settings.thumbnail_width,
         page_transition: settings.page_transition,
         series_transition: settings.series_transition,
         window_mode: settings.window_mode,
+        tools_ready: crate::tools::available("ffprobe") && crate::tools::available("ffmpeg"),
     })
 }
 

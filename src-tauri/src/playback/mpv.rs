@@ -3,6 +3,7 @@
 //! MPV 通过 `--wid` 渲染到主窗口下的子窗口里，不再弹出独立的播放器窗口。
 
 use std::{
+    path::PathBuf,
     process::{Child, Command},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -36,14 +37,16 @@ pub fn spawn_embedded(
     wid: isize,
     input_conf: &str,
     log_file: &str,
+    subtitle_files: &[PathBuf],
+    suppress_subtitle_auto: bool,
 ) -> Result<Child> {
-    let mut command = Command::new("mpv");
+    let program = crate::tools::resolve("mpv");
+    let mut command = Command::new(&program);
     command
         .arg("--terminal=no")
         .arg("--osc=no")
         .arg("--osd-level=0")
         .arg("--keep-open=yes")
-        .arg("--sub-auto=fuzzy")
         .arg("--force-window=yes")
         // 软件解码。部分老显卡驱动上 D3D11 硬件解码会出现音画不同步和卡顿，
         // 而 1080p H.264 的软件解码开销很低。
@@ -54,7 +57,18 @@ pub fn spawn_embedded(
         .arg(format!("--log-file={log_file}"))
         .arg(format!("--wid={wid}"))
         .arg(format!("--input-conf={input_conf}"))
-        .arg(format!("--input-ipc-server={pipe}"));
+        .arg(format!("--input-ipc-server={pipe}"))
+        .arg(if suppress_subtitle_auto {
+            "--sub-auto=no"
+        } else {
+            "--sub-auto=fuzzy"
+        });
+
+    // 外挂字幕已经由 Rust 侧统一转成 UTF-8 缓存，显式加载，避免
+    // mpv/libavformat 用错误编码重新读取原始 GBK 文件。
+    for subtitle in subtitle_files {
+        command.arg(format!("--sub-file={}", subtitle.display()));
+    }
 
     if start_ms >= 5_000 {
         command.arg(format!("--start={:.3}", start_ms as f64 / 1000.0));
@@ -69,9 +83,12 @@ pub fn spawn_embedded(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    command
-        .spawn()
-        .with_context(|| "无法启动 mpv，请确认 mpv 已安装并加入 PATH")
+    command.spawn().with_context(|| {
+        format!(
+            "无法启动 mpv（{}），安装包可能不完整，或 mpv 不在 PATH 中",
+            program.display()
+        )
+    })
 }
 
 #[cfg(windows)]

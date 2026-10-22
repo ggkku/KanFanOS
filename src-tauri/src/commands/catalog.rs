@@ -66,3 +66,14 @@ pub fn list_episodes(
         .list_episodes(series_id)
         .map_err(|error| format!("{error:#}"))
 }
+
+#[tauri::command]
+pub fn list_extra_episodes(
+    state: State<'_, AppState>,
+    series_id: i64,
+) -> Result<Vec<EpisodeSummary>, String> {
+    state
+        .db
+        .list_extra_episodes(series_id)
+        .map_err(|error| format!("{error:#}"))
+}

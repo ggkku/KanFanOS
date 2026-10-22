@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { Sidebar } from "./Sidebar";
 import type { CategorySummary } from "../../types/library";
 import type { View } from "../../types/navigation";
@@ -11,6 +11,8 @@ interface AppShellProps {
   query: string;
   onQueryChange: (query: string) => void;
   onNavigate: (view: View) => void;
+  /** 主滚动容器，用于从选集页返回时恢复位置。 */
+  scrollRef?: RefObject<HTMLElement | null>;
   children: ReactNode;
 }
 
@@ -22,6 +24,7 @@ export function AppShell({
   query,
   onQueryChange,
   onNavigate,
+  scrollRef,
   children,
 }: AppShellProps) {
   return (
@@ -35,7 +38,7 @@ export function AppShell({
         onQueryChange={onQueryChange}
         onNavigate={onNavigate}
       />
-      <main className="flex-1 overflow-y-auto">
+      <main ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-5 px-8 py-8">
           {children}
         </div>

@@ -30,6 +30,8 @@ pub struct SeriesSummary {
     pub cover_path: Option<String>,
     /// 封面文件的修改时间，用于避免浏览器缓存。
     pub cover_version: Option<i64>,
+    /// 用户手动维护的「看过遍数」。
+    pub watch_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +56,8 @@ pub struct SearchItem {
     pub matched_episodes: i64,
     /// 第一条命中的剧集文件名，便于确认搜索为什么命中。
     pub match_preview: Option<String>,
+    /// 用户手动维护的「看过遍数」。
+    pub watch_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,15 +89,19 @@ const SERIES_SELECT: &str = "
            s.name,
            s.path,
            (SELECT COUNT(*) FROM videos v
-             WHERE v.series_id = s.id AND v.status <> 'missing') AS episode_count,
+             WHERE v.series_id = s.id
+               AND v.status <> 'missing'
+               AND v.kind = 'main') AS episode_count,
            (SELECT v.thumbnail_key FROM videos v
              WHERE v.series_id = s.id
                AND v.status <> 'missing'
+               AND v.kind = 'main'
                AND v.thumbnail_key IS NOT NULL
              ORDER BY v.filename
              LIMIT 1) AS cover_key,
            s.cover_path,
-           s.cover_version
+           s.cover_version,
+           s.watch_count
       FROM series s
 ";
 
@@ -146,6 +154,20 @@ impl Database {
             [path],
             |row| row.get(0),
         )?)
+    }
+
+    /// 设置手动「看过遍数」，不自动增减。
+    pub fn set_series_watch_count(
+        &self,
+        series_id: i64,
+        count: i64,
+    ) -> Result<i64> {
+        let count = count.max(0);
+        self.conn()?.execute(
+            "UPDATE series SET watch_count = ?2 WHERE id = ?1",
+            params![series_id, count],
+        )?;
+        Ok(count)
     }
 
     /// 记录扫描中发现的档期目录，空档期同样保留。
@@ -321,10 +343,13 @@ impl Database {
                     s.name,
                     s.path,
                     (SELECT COUNT(*) FROM videos v
-                      WHERE v.series_id = s.id AND v.status <> 'missing') AS episode_count,
+                      WHERE v.series_id = s.id
+                        AND v.status <> 'missing'
+                        AND v.kind = 'main') AS episode_count,
                     (SELECT v.thumbnail_key FROM videos v
                       WHERE v.series_id = s.id
                         AND v.status <> 'missing'
+                        AND v.kind = 'main'
                         AND v.thumbnail_key IS NOT NULL
                       ORDER BY v.filename
                       LIMIT 1) AS cover_key,
@@ -339,7 +364,8 @@ impl Database {
                         AND v.status <> 'missing'
                         AND v.filename LIKE ?2 ESCAPE '\\'
                       ORDER BY v.filename
-                      LIMIT 1) AS match_preview
+                      LIMIT 1) AS match_preview,
+                    s.watch_count
                FROM series s
               WHERE s.library_id = ?1 AND {SERIES_HAS_EPISODES}
                 AND (
@@ -376,6 +402,7 @@ impl Database {
                     cover_version: row.get(8)?,
                     matched_episodes: row.get(9)?,
                     match_preview: row.get(10)?,
+                    watch_count: row.get(11)?,
                 })
             },
         )?;
@@ -388,6 +415,19 @@ impl Database {
     }
 
     pub fn list_episodes(&self, series_id: i64) -> Result<Vec<EpisodeSummary>> {
+        self.episodes_by_kind(series_id, "main")
+    }
+
+    /// 番剧子文件夹里的 CM/PV/特典，进入二级选集页。
+    pub fn list_extra_episodes(&self, series_id: i64) -> Result<Vec<EpisodeSummary>> {
+        self.episodes_by_kind(series_id, "extra")
+    }
+
+    fn episodes_by_kind(
+        &self,
+        series_id: i64,
+        kind: &str,
+    ) -> Result<Vec<EpisodeSummary>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT v.id,
@@ -402,10 +442,13 @@ impl Database {
                     COALESCE(w.completed, 0)
                FROM videos v
                LEFT JOIN watch_history w ON w.video_id = v.id
-              WHERE v.series_id = ?1 AND v.status <> 'missing'",
+              WHERE v.series_id = ?1
+                AND v.status <> 'missing'
+                AND v.kind = ?2
+              ORDER BY v.filename COLLATE NOCASE, v.path",
         )?;
 
-        let rows = stmt.query_map([series_id], |row| {
+        let rows = stmt.query_map(params![series_id, kind], |row| {
             Ok(EpisodeSummary {
                 id: row.get(0)?,
                 filename: row.get(1)?,
@@ -439,6 +482,7 @@ fn map_series(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeriesSummary> {
         cover_key: row.get(6)?,
         cover_path: row.get(7)?,
         cover_version: row.get(8)?,
+        watch_count: row.get(9)?,
     })
 }
 
@@ -511,6 +555,7 @@ mod tests {
                 extension: "mp4".to_string(),
                 file_size: 1,
                 modified_at: Some(1),
+                kind: "main".to_string(),
             })
             .collect();
 

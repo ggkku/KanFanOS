@@ -13,7 +13,9 @@ pnpm install
 pnpm tauri dev
 ```
 
-首次运行会在 `%LOCALAPPDATA%\KanFanOS\` 下创建数据目录：
+## 数据目录
+
+默认安装（`%LOCALAPPDATA%\KanFanOS`）时使用用户目录：
 
 ```text
 %LOCALAPPDATA%\KanFanOS\
@@ -23,20 +25,73 @@ pnpm tauri dev
 └── config\
 ```
 
+**安装到自定义目录时（release 构建）**，如果安装目录可写，数据会放在
+`<安装目录>\data`。例如安装到 `D:\KanFanOS`：
+
+```text
+D:\KanFanOS\data\
+├── database\library.sqlite
+├── thumbnails\
+├── logs\
+└── config\
+```
+
+首次启动时，如果新的 `data` 目录里还没有数据库、而旧的
+`%LOCALAPPDATA%\KanFanOS\database\library.sqlite` 存在，会自动把数据库和
+`config` 复制过来；缩略图不会搬，改为后台重新生成。旧目录不会自动删除，
+确认新位置正常后可以手动清理。
+
+- 开发模式（`pnpm tauri dev`）始终使用 `%LOCALAPPDATA%\KanFanOS`，不会写进
+  `target\debug`。
+- 安装到 `C:\Program Files` 等不可写目录时自动退回 `%LOCALAPPDATA%\KanFanOS`。
+- WebView2 的缓存仍在 `%LOCALAPPDATA%\com.kanfanos.app`（首次运行后通常
+  一百多 MB），这部分不受数据目录影响。
+- 数据目录的选择和迁移结果记录在数据目录下的 `logs\app.log`。
+
+> 从旧版升级并改到 `D:\KanFanOS` 安装时：先退出旧版，再运行新安装包并选择
+> `D:\KanFanOS`。第一次启动会自动把 `%LOCALAPPDATA%\KanFanOS` 里的数据库和
+> `config` 复制到 `D:\KanFanOS\data`，缩略图重新生成；确认新位置正常后再删除
+> 旧目录，并卸载旧的 C 盘安装。
+
 ## 构建
 
 ```bash
 pnpm tauri build --bundles nsis
 ```
 
+构建前会自动执行 `pnpm sidecars`，把本机的 mpv / FFmpeg / FFprobe 复制到
+`src-tauri/binaries/`（文件已存在则跳过，`-Force` 可重新复制）：
+
+```powershell
+winget install --id shinchiro.mpv -e
+winget install --id Gyan.FFmpeg -e
+pnpm sidecars
+```
+
+这些可执行文件会作为 sidecar 随安装包分发，目标机器无需再安装或配置 PATH。
+`src-tauri/binaries/` 体积较大，不纳入版本管理。
+
+安装目录里必须同时有 `mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`。缺少
+`ffprobe`/`ffmpeg` 时应用仍能启动和播放，但视频时长与缩略图不会生成，
+界面会显示缺少工具的提示；后台处理的具体错误记录在数据目录的
+`logs\media.log`。
+
 安装包输出：
 
 ```text
-src-tauri/target/release/bundle/nsis/KanFanOS_0.1.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/KanFanOS_0.1.1_x64-setup.exe
 ```
 
-> 安装包不包含 FFmpeg / FFprobe / MPV，目标机器需要自行安装并加入 PATH。
-> MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
+> 内置 mpv 和 FFmpeg 后安装包约 153 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
+
+## 卸载
+
+卸载程序只删除安装目录中的程序文件（`kanfanos.exe`、`mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`、`d3dcompiler_43.dll`、`uninstall.exe`）、快捷方式和注册表项。
+
+- **不会删除番剧根目录**（例如 `C:\KanFanOS\番`）或其中的视频：卸载器不读取 `settings.json`，也不扫描番剧目录。
+- 默认安装时数据在 `%LOCALAPPDATA%\KanFanOS`；自定义安装（如 `D:\KanFanOS`）时数据在 `<安装目录>\data`。两种情况下 `database\`、`thumbnails\`、`config\`、`logs\` 都会保留，卸载器只删自己安装的程序文件，非递归的目录删除不会动这些数据。
+- 卸载页的「删除应用数据」只清理 `%LOCALAPPDATA%\com.kanfanos.app`（WebView2 缓存），不会清理上面这些媒体库数据。
+- 需要彻底清理时，卸载后手动删除数据目录：默认安装删 `%LOCALAPPDATA%\KanFanOS`，自定义安装删 `<安装目录>\data`。删除前确认番剧根目录不在这些目录里面；默认的 `C:\KanFanOS\番` 是独立目录，不受影响。
 
 ## 检查
 
@@ -77,7 +132,8 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
   - `aliases`：搜索别名数组，例如 `["英文名", "简称"]`
   - `cover`：封面图片相对路径，例如 `"cover.jpg"`；留空时依次查找 `cover` / `poster` / `folder` 图片，仍找不到则使用文件夹内排序最靠前的一张图片
 - 修改配置或替换封面后，文件监听会自动同步，无需重新扫描。
-- 番剧卡片优先显示文件夹内的封面，没有封面时使用第一集缩略图。
+- 番剧卡片优先显示文件夹内的封面；没有封面时显示番剧名首字占位，不再用第一集缩略图顶替。
+- 番剧文件夹根目录的视频进入主选集；子文件夹里的 CM/PV/特典等进入「其他视频」二级选集，不显示集数序号。
 
 ## 当前进度
 
@@ -108,7 +164,7 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - FFprobe 提取时长、分辨率、视频/音频编码、帧率
 - FFmpeg 在时长 20% 处截帧，生成 480px JPEG 缩略图
 - 后台处理队列：最多 3 个并发进程，失败重试 3 次
-- 番剧卡片使用第一集缩略图作为封面，剧集列表显示缩略图与时长
+- 剧集列表和播放器显示缩略图与时长；番剧卡片不再把第一集缩略图当作封面，没有封面时显示首字占位
 - 扫描完成后自动启动，应用重启后继续未完成任务
 
 **第 5 步：浏览与搜索**
@@ -164,6 +220,8 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 **第 12 步：播放器交互打磨**
 
 - 字幕按钮在控制栏内展开字幕选项条，可关闭字幕或切换字幕轨，并显示当前状态
+- 音轨按钮沿用字幕的交互，在控制栏内展开音轨选项条，可切换 MKV 等多音轨文件
+- 从选集页返回时恢复离开前的滚动位置，封面飞回动画的落点与卡片位置一致
 - 播放器全屏只影响抽屉布局，和系统窗口的「窗口模式」完全独立
 - 播放器全屏、控制栏显隐、字幕条展开统一使用 FLIP 动画；原生 mpv 窗口按视频宽高比适配并逐帧同步
 - 全屏下控制栏 2.5 秒无操作自动隐藏（暂停时也隐藏），鼠标移动唤出；隐藏时一并隐藏鼠标指针
@@ -173,14 +231,27 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 **第 13 步：剧场版与最近观看**
 
 - 顶层 `剧场版/` 目录作为独立分类，固定排在侧栏最上方，子目录按影片索引
-- 最近观看最多展示 6 条；观看记录本身不裁剪，所有剧集的续播进度都会保留
+- 最近观看按番剧去重，每部番只显示最近观看的一集；点击进入选集页并自动续播
+- 最近观看最多展示 6 部番剧；观看记录本身不裁剪，所有剧集的续播进度都会保留
+
+**第 14 步：0.1.1 修复与交互补充**
+
+- 音轨切换：控制栏音轨按钮 + chip 条，和字幕交互一致
+- 选集页返回恢复滚动位置；页面切换使用视口大小的旧页面快照，长选集不再溢出到下一页
+- 番剧只把根目录视频放入主选集；子目录 CM/PV 进入「其他视频」二级选集
+- 选集页支持「全部标记已看完」「清除观看记录」和手动「看过 N 遍」计数
+- 中文字幕先识别 UTF-8 / UTF-16 / GB18030，再统一转成 UTF-8 缓存加载，修复 GBK SRT 乱码；外挂字幕轨道保留原文件名
+- 字幕菜单支持整体提前/延后 0.1 秒和复位；切轨道时面板不会自动收起
+- 设置里支持开机自启动（写入当前用户的 Windows Run 项）
+- 单击视频画面或上下黑边只收起控制栏，不再切换播放/暂停
+- 空格播放/暂停不再唤出已隐藏的控制栏
 
 ## 已知限制
 
 - 尚未用真实的大规模视频库做完整验收，目前测试数据是 FFmpeg 生成的短视频。
 - 文件重命名后观看记录不会迁移（按路径建立索引，旧记录会变成 `missing`）。
 - 旧版本在 `%LOCALAPPDATA%\KanFanOS\config\series\` 生成的 JSON 配置已废弃，可以手动删除。
-- 安装包不包含 FFmpeg / FFprobe / MPV，需要目标机器已安装并加入 PATH。
+- 安装包内置 mpv / FFmpeg / FFprobe，体积较大；构建机需要先安装这些工具并运行 `pnpm sidecars`。
 - MSI 打包依赖 WiX 下载，网络受限时使用 `--bundles nsis`。
 - 列表使用分页查询，暂未引入虚拟滚动。
 - 无法提供真正的独占全屏：WebView2 由 DWM 合成，窗口模式只支持「窗口 / 全屏」两种。
@@ -193,6 +264,7 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 ## 目录说明
 
 ```text
+scripts/                构建辅助脚本（收集 sidecar 等）
 src/                    React 前端
 ├── api/                Tauri 命令封装
 ├── components/         通用组件与布局
@@ -211,5 +283,6 @@ src-tauri/              Rust 后端
     ├── catalog.rs      档期目录名解析
     ├── settings.rs     settings.json 读写
     ├── paths.rs        数据目录解析
+    ├── tools.rs        sidecar / PATH 外部工具定位
     └── state.rs        应用状态
 ```
