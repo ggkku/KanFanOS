@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -9,6 +12,12 @@ use crate::settings::{self, Settings};
 use crate::state::AppState;
 use crate::time::now_ms;
 use crate::watcher;
+
+/// 进入全屏前窗口是否处于最大化；退出全屏时据此恢复。
+///
+/// Windows 在最大化状态下直接切全屏时，客户区仍停留在工作区高度，
+/// 全屏底部会留下任务栏高度的黑边，所以必须先还原窗口。
+static RESTORE_MAXIMIZED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,7 +164,22 @@ pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), Strin
         window
             .set_decorations(true)
             .map_err(|error| error.to_string())?;
+
+        // 从全屏返回时恢复进入前的最大化状态。
+        if RESTORE_MAXIMIZED.swap(false, Ordering::SeqCst) {
+            window.maximize().map_err(|error| error.to_string())?;
+        }
     } else {
+        // 最大化窗口直接进入全屏会保留工作区高度，底部留出任务栏黑边。
+        // 先还原窗口再全屏，并记住状态供返回窗口模式时恢复。
+        if !window.is_fullscreen().unwrap_or(false) {
+            let was_maximized = window.is_maximized().unwrap_or(false);
+            if was_maximized {
+                window.unmaximize().map_err(|error| error.to_string())?;
+            }
+            RESTORE_MAXIMIZED.store(was_maximized, Ordering::SeqCst);
+        }
+
         window.set_fullscreen(true).map_err(|error| error.to_string())?;
         window
             .set_always_on_top(false)

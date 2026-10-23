@@ -361,6 +361,8 @@ fn scan_series(
         config.cover_version,
         now_ms(),
     )?;
+    // 评分以 kanfanos.toml 为准，扫描时同步到数据库索引。
+    ctx.state.db.set_series_rating(series_id, config.rating)?;
     ctx.series_found += 1;
 
     for entry in WalkDir::new(dir).follow_links(false) {

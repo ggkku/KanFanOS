@@ -1,13 +1,29 @@
-import { useState } from "react";
-import { ArrowLeft, Clapperboard, Film, Play } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
-  clearSeriesHistory,
-  markSeriesWatched,
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Clapperboard,
+  Film,
+  Play,
+  Settings2,
+} from "lucide-react";
+import {
+  getSeriesConfig,
+  setSeriesAwards,
+  setSeriesRating,
   setSeriesWatchCount,
 } from "../../api/library";
 import { errorMessage } from "../../lib/errors";
 import { thumbnailUrl } from "../../lib/thumbnails";
-import type { EpisodeSummary, SeriesSummary } from "../../types/library";
+import type {
+  EpisodeSummary,
+  SeriesConfigView,
+  SeriesSummary,
+} from "../../types/library";
+import { SeriesAwards } from "./SeriesAwards";
+import { SeriesConfigDialog } from "./SeriesConfigDialog";
+import { SeriesRating } from "./SeriesRating";
 
 interface SeriesDetailProps {
   series: SeriesSummary;
@@ -18,6 +34,7 @@ interface SeriesDetailProps {
   onBack: () => void;
   onPlay: (episode: EpisodeSummary) => void;
   onOpenExtras: () => void;
+  onNavigateSeries: (seriesId: number) => void;
   onChanged: () => Promise<void>;
 }
 
@@ -52,10 +69,45 @@ export function SeriesDetail({
   onBack,
   onPlay,
   onOpenExtras,
+  onNavigateSeries,
   onChanged,
 }: SeriesDetailProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [config, setConfig] = useState<SeriesConfigView | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [rating, setRating] = useState<number | null>(series.rating);
+  const [ratingBusy, setRatingBusy] = useState(false);
+  const [awards, setAwards] = useState<string[]>([]);
+  const [awardsBusy, setAwardsBusy] = useState(false);
+  const [awardSignal, setAwardSignal] = useState(0);
+
+  // 切换番剧或外部刷新后同步评分。
+  useEffect(() => {
+    setRating(series.rating);
+  }, [series.id, series.rating]);
+
+  // 配置里的上一季 / 下一季决定工具栏按钮是否出现。
+  useEffect(() => {
+    let disposed = false;
+    setConfig(null);
+    setAwards([]);
+
+    getSeriesConfig(series.id)
+      .then((view) => {
+        if (disposed) return;
+        setConfig(view);
+        setRating(view.rating);
+        setAwards(view.awards);
+      })
+      .catch((err: unknown) => {
+        if (!disposed) setActionError(errorMessage(err));
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [series.id]);
 
   const runAction = async (name: string, action: () => Promise<unknown>) => {
     if (busy) return;
@@ -74,8 +126,54 @@ export function SeriesDetail({
   const actionButton =
     "rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-[11px] text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40";
 
+  const changeRating = async (next: number | null) => {
+    if (ratingBusy) return;
+
+    setRatingBusy(true);
+    setActionError(null);
+    try {
+      const saved = await setSeriesRating(series.id, next);
+      setRating(saved);
+      await onChanged();
+    } catch (err) {
+      setActionError(errorMessage(err));
+    } finally {
+      setRatingBusy(false);
+    }
+  };
+
+  const changeAwards = async (next: string[]) => {
+    if (awardsBusy) return;
+
+    setAwardsBusy(true);
+    setActionError(null);
+    try {
+      const saved = await setSeriesAwards(series.id, next);
+      setAwards(saved);
+    } catch (err) {
+      setActionError(errorMessage(err));
+    } finally {
+      setAwardsBusy(false);
+    }
+  };
+
+  const addAward = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || awards.includes(trimmed)) return;
+    void changeAwards([...awards, trimmed]);
+  };
+
+  // 配置弹窗里删除奖项；失败时让弹窗显示错误。
+  const removeAward = async (name: string) => {
+    const saved = await setSeriesAwards(
+      series.id,
+      awards.filter((award) => award !== name),
+    );
+    setAwards(saved);
+  };
+
   return (
-    <div className="flex flex-1 flex-col gap-6">
+    <div className="relative flex flex-1 flex-col gap-6">
       <button
         type="button"
         onClick={onBack}
@@ -83,6 +181,16 @@ export function SeriesDetail({
       >
         <ArrowLeft size={14} />
         返回
+      </button>
+
+      {/* 右上角；绝对定位，不占用返回行的高度，避免下移封面。 */}
+      <button
+        type="button"
+        onClick={() => setConfigOpen(true)}
+        className={`${actionButton} absolute right-0 top-0 flex items-center gap-1.5`}
+      >
+        <Settings2 size={12} />
+        配置
       </button>
 
       <header className="flex items-start gap-5">
@@ -104,7 +212,7 @@ export function SeriesDetail({
           </div>
         )}
 
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-semibold">{series.name}</h1>
           <p className="mt-1 text-sm text-neutral-400">
             {series.category} · {episodes.length} 集
@@ -117,31 +225,29 @@ export function SeriesDetail({
           </p>
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() =>
-                void runAction("watched", () =>
-                  markSeriesWatched(series.id),
-                )
-              }
-              disabled={busy != null}
-              className={actionButton}
-            >
-              {busy === "watched" ? "标记中…" : "全部标记已看完"}
-            </button>
+            {config?.previous && (
+              <button
+                type="button"
+                onClick={() => onNavigateSeries(config.previous!.id)}
+                title={`上一季：${config.previous.name}`}
+                className={`${actionButton} flex items-center gap-1`}
+              >
+                <ChevronLeft size={12} />
+                上一季
+              </button>
+            )}
 
-            <button
-              type="button"
-              onClick={() =>
-                void runAction("clear", () =>
-                  clearSeriesHistory(series.id),
-                )
-              }
-              disabled={busy != null}
-              className={`${actionButton} hover:border-red-900/60 hover:bg-red-950/30 hover:text-red-300`}
-            >
-              {busy === "clear" ? "清除中…" : "清除观看记录"}
-            </button>
+            {config?.next && (
+              <button
+                type="button"
+                onClick={() => onNavigateSeries(config.next!.id)}
+                title={`下一季：${config.next.name}`}
+                className={`${actionButton} flex items-center gap-1`}
+              >
+                下一季
+                <ChevronRight size={12} />
+              </button>
+            )}
 
             <div className="flex items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-[11px] text-neutral-400">
               <span>看过</span>
@@ -193,11 +299,27 @@ export function SeriesDetail({
                 其他视频 · {extraCount}
               </button>
             )}
+
           </div>
 
           {actionError && (
             <p className="mt-2 text-[11px] text-red-400">{actionError}</p>
           )}
+        </div>
+
+        {/* 评分和奖项固定在右侧，不占用封面 / 选集列表的纵向空间。 */}
+        <div className="flex w-56 shrink-0 flex-col items-end gap-2">
+          <SeriesRating
+            value={rating}
+            disabled={ratingBusy}
+            onChange={(next) => void changeRating(next)}
+          />
+          <SeriesAwards
+            awards={awards}
+            busy={awardsBusy}
+            openSignal={awardSignal}
+            onAdd={addAward}
+          />
         </div>
       </header>
 
@@ -301,6 +423,27 @@ export function SeriesDetail({
           })
         )}
       </section>
+
+      {configOpen && config && (
+        <SeriesConfigDialog
+          series={series}
+          config={config}
+          onClose={() => setConfigOpen(false)}
+          onSaved={(updated) => {
+            setConfig(updated);
+            setRating(updated.rating);
+            setAwards(updated.awards);
+            setConfigOpen(false);
+          }}
+          onAddAward={() => {
+            setConfigOpen(false);
+            setAwardSignal((value) => value + 1);
+          }}
+          awards={awards}
+          onRemoveAward={removeAward}
+          onChanged={onChanged}
+        />
+      )}
     </div>
   );
 }

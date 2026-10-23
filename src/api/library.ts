@@ -6,6 +6,7 @@ import type {
   CacheCleanup,
   CacheStats,
   CategorySummary,
+  ConfigRepairSummary,
   EpisodeSummary,
   LibraryStats,
   LibrarySummary,
@@ -22,6 +23,9 @@ import type {
   ScanSummary,
   WindowMode,
   SearchPage,
+  SeasonLinkConflict,
+  SeriesConfigView,
+  SeriesOption,
   SeriesPage,
   SeriesSort,
   SeriesSummary,
@@ -78,6 +82,12 @@ export function getCacheStats(): Promise<CacheStats> {
 
 export function clearThumbnailCache(): Promise<CacheCleanup> {
   return invoke<CacheCleanup>("clear_thumbnail_cache");
+}
+
+export function repairSeriesConfigs(
+  libraryId: number,
+): Promise<ConfigRepairSummary> {
+  return invoke<ConfigRepairSummary>("repair_series_configs", { libraryId });
 }
 
 export function listCategories(
@@ -139,6 +149,72 @@ export function setSeriesWatchCount(
   count: number,
 ): Promise<number> {
   return invoke<number>("set_series_watch_count", { seriesId, count });
+}
+
+export function setSeriesRating(
+  seriesId: number,
+  rating: number | null,
+): Promise<number | null> {
+  return invoke<number | null>("set_series_rating", { seriesId, rating });
+}
+
+export function setSeriesAwards(
+  seriesId: number,
+  awards: string[],
+): Promise<string[]> {
+  return invoke<string[]>("set_series_awards", { seriesId, awards });
+}
+
+export function getSeriesAwards(seriesId: number): Promise<string[]> {
+  return invoke<string[]>("get_series_awards", { seriesId });
+}
+
+export function getSeriesConfig(
+  seriesId: number,
+): Promise<SeriesConfigView> {
+  return invoke<SeriesConfigView>("get_series_config", { seriesId });
+}
+
+export function searchSeriesOptions(
+  libraryId: number,
+  query: string,
+  limit: number,
+): Promise<SeriesOption[]> {
+  return invoke<SeriesOption[]>("search_series_options", {
+    libraryId,
+    query,
+    limit,
+  });
+}
+
+export function checkSeasonLinks(
+  seriesId: number,
+  previousId: number | null,
+  nextId: number | null,
+): Promise<SeasonLinkConflict[]> {
+  return invoke<SeasonLinkConflict[]>("check_season_links", {
+    seriesId,
+    previousId,
+    nextId,
+  });
+}
+
+export function updateSeriesConfig(
+  seriesId: number,
+  name: string,
+  aliases: string[],
+  previousId: number | null,
+  nextId: number | null,
+  overwriteInverse: boolean,
+): Promise<SeriesConfigView> {
+  return invoke<SeriesConfigView>("update_series_config", {
+    seriesId,
+    name,
+    aliases,
+    previousId,
+    nextId,
+    overwriteInverse,
+  });
 }
 
 export function scanLibrary(libraryId: number): Promise<ScanSummary> {

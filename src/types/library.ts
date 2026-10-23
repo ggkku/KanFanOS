@@ -42,6 +42,16 @@ export interface CacheCleanup {
   removedBytes: number;
 }
 
+/// 批量检查/修复 kanfanos.toml 的结果。
+export interface ConfigRepairSummary {
+  checked: number;
+  created: number;
+  updated: number;
+  namesCleared: number;
+  invalid: number;
+  errors: number;
+}
+
 export interface CategorySummary {
   key: string;
   label: string;
@@ -61,6 +71,8 @@ export interface SeriesSummary {
   coverPath: string | null;
   coverVersion: number | null;
   watchCount: number;
+  /// 用户评分 0-10；null 表示未评分。
+  rating: number | null;
 }
 
 export interface SeriesPage {
@@ -76,6 +88,32 @@ export interface SearchItem extends SeriesSummary {
 export interface SearchPage {
   items: SearchItem[];
   total: number;
+}
+
+/// 「上一季 / 下一季」的目标番剧。
+export interface SeriesOption {
+  id: number;
+  name: string;
+  category: string;
+  path: string;
+}
+
+/// 选集页配置弹窗的当前值。
+export interface SeriesConfigView {
+  name: string;
+  aliases: string[];
+  rating: number | null;
+  awards: string[];
+  previous: SeriesOption | null;
+  next: SeriesOption | null;
+}
+
+/// 自动同步反向季链接时会覆盖的目标现有链接。
+export interface SeasonLinkConflict {
+  target: SeriesOption;
+  /// 需要修改目标哪一侧：`next` 对应本番的「上一季」，`previous` 对应「下一季」。
+  direction: "next" | "previous";
+  current: SeriesOption | null;
 }
 
 export interface EpisodeSummary {

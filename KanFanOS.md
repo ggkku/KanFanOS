@@ -143,7 +143,7 @@ KanFanOS 是一款面向 Windows 的个人视频管理软件，用于管理指�
 
 \- 完整扫描后把未发现的文件标记为 `missing`；取消扫描时不误判。
 
-\- 首次扫描在每部番剧文件夹内生成 `kanfanos.toml`，包含 `name`、`aliases`、`cover` 三个字段；已存在的文件不会被覆盖，修改后由文件监听自动同步。
+\- 首次扫描在每部番剧文件夹内生成 `kanfanos.toml`，包含 `name`、`aliases`、`cover`、`rating`、`awards`、`previous`、`next` 等字段；扫描不会覆盖已存在的文件，修改后由文件监听自动同步。设置页提供「检查并修复」，可为旧版文件补齐字段、把与文件夹同名的 `name` 改为空，并在改写前备份 `kanfanos.toml.bak`。
 
 \- 番剧卡片优先使用 `kanfanos.toml` 指定的封面图片（直接读取番剧文件夹）；`cover` 为空时依次查找 `cover` / `poster` / `folder` 图片，仍找不到则使用文件夹内排序最靠前的一张图片；完全没有图片时显示番剧名首字占位，不再使用第一集缩略图。别名参与关键词搜索。
 
@@ -986,6 +986,10 @@ CREATE TABLE series (
 ```
 
 \- `aliases` 来自 `kanfanos.toml`，用换行分隔，参与搜索。
+
+\- 迁移 007 追加 `watch_count`（手动维护的看过遍数）；迁移 008 追加 `rating`（0-10，NULL 表示未评分）。评分以 `kanfanos.toml` 为准，扫描时同步到该列。
+
+\- 迁移 007 还给 `videos` 追加 `kind`：根目录视频为 `main`（主选集），子目录 CM/PV/特典为 `extra`（其他视频）。
 
 \- `cover_path` / `cover_version` 记录番剧文件夹内的封面图片及其修改时间。
 

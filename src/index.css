@@ -307,9 +307,10 @@ textarea,
   animation: extras-out-right 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-.clip-x {
-  overflow-x: clip;
-}
+/*
+ * 横向裁切统一由外层 MAIN 的 overflow-x: hidden 负责，
+ * 页面内容本身不再裁切，选番卡片的发光可以画进左右内边距。
+ */
 
 ::-webkit-scrollbar {
   width: 10px;

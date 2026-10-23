@@ -11,6 +11,7 @@ import {
   Info,
   Power,
   RefreshCw,
+  Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -20,6 +21,7 @@ import {
   getCacheStats,
   getLibraryStats,
   quitApp,
+  repairSeriesConfigs,
   setAutoStart,
   setAutoWatch,
   setPageTransition,
@@ -32,6 +34,7 @@ import { errorMessage } from "../../lib/errors";
 import type {
   AppSettings,
   CacheStats,
+  ConfigRepairSummary,
   LibraryStats,
   PageTransition,
   SeriesTransition,
@@ -115,6 +118,9 @@ export function SettingsPage({
   const [stats, setStats] = useState<LibraryStats | null>(null);
   const [cache, setCache] = useState<CacheStats | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairResult, setRepairResult] =
+    useState<ConfigRepairSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -248,6 +254,34 @@ export function SettingsPage({
       setError(errorMessage(err));
     } finally {
       setClearing(false);
+    }
+  };
+
+  const repairConfigs = async () => {
+    if (settings?.libraryId == null) return;
+
+    const confirmed = await ask(
+      "检查并修复所有番剧的 kanfanos.toml？\n会补齐缺失字段、把与文件夹名相同的显示名称改为留空；修改前会保留 kanfanos.toml.bak。",
+      {
+        title: "检查并修复配置",
+        kind: "info",
+        okLabel: "开始检查",
+        cancelLabel: "取消",
+      },
+    );
+    if (!confirmed) return;
+
+    setRepairing(true);
+    setError(null);
+    setRepairResult(null);
+
+    try {
+      const result = await repairSeriesConfigs(settings.libraryId);
+      setRepairResult(result);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setRepairing(false);
     }
   };
 
@@ -416,11 +450,39 @@ export function SettingsPage({
           </button>
         </div>
 
-        <InfoRow
-          icon={FolderCog}
-          label="番剧配置"
-          value="每个番剧文件夹内的 kanfanos.toml（可手动编辑）"
-        />
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <FolderCog size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">番剧配置</div>
+          <div
+            className={`min-w-0 flex-1 text-[11px] leading-relaxed ${
+              repairResult ? "text-neutral-300" : "text-neutral-500"
+            }`}
+          >
+            {repairResult ? (
+              <>
+                检查 {repairResult.checked} 部：新建 {repairResult.created}、
+                更新 {repairResult.updated}、名称清空{" "}
+                {repairResult.namesCleared}
+                {repairResult.invalid > 0 &&
+                  `、损坏重置 ${repairResult.invalid}`}
+                {repairResult.errors > 0 &&
+                  `、失败 ${repairResult.errors}`}
+              </>
+            ) : (
+              "检查并补齐旧配置字段；名称与文件夹名相同时改为留空；修改前保留 kanfanos.toml.bak"
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => void repairConfigs()}
+            disabled={repairing || settings?.libraryId == null}
+            title="检查所有番剧的 kanfanos.toml，补齐缺失字段并修复与文件夹同名的显示名称"
+            className={`${actionButton} flex items-center gap-1.5`}
+          >
+            <Wrench size={12} />
+            {repairing ? "检查中…" : "检查并修复"}
+          </button>
+        </div>
         <InfoRow
           icon={Database}
           label="数据库"
@@ -436,7 +498,7 @@ export function SettingsPage({
               : "读取中…"
           }
         />
-        <InfoRow icon={Info} label="版本" value="KanFanOS 0.1.1" />
+        <InfoRow icon={Info} label="版本" value="KanFanOS 0.2.0" />
       </section>
 
       {error && (

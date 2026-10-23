@@ -862,6 +862,16 @@ function App() {
     }
   };
 
+  // 「上一季 / 下一季」：按 id 取出完整番剧信息后走正常的选集页切换。
+  const openSeriesById = async (seriesId: number) => {
+    try {
+      const target = await getSeries(seriesId);
+      await openSeries(target, null);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
   const refreshSelectedSeries = async () => {
     if (!selectedSeries) return;
 
@@ -913,6 +923,7 @@ function App() {
           }
         }}
         onOpenExtras={openExtras}
+        onNavigateSeries={(seriesId) => void openSeriesById(seriesId)}
         onChanged={refreshSelectedSeries}
       />
     );
@@ -1170,7 +1181,7 @@ function App() {
         </div>
       )}
 
-        <div className="relative flex flex-1 flex-col clip-x">
+        <div className="relative flex flex-1 flex-col">
           <div
             key={viewKey}
             className={`relative z-10 flex flex-1 flex-col ${activeEnterAnimation}`}

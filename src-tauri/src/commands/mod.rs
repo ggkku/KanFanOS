@@ -4,4 +4,5 @@ pub mod history;
 pub mod library;
 pub mod media;
 pub mod playback;
+pub mod series;
 pub mod settings;

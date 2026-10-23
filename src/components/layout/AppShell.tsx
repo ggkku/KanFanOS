@@ -38,7 +38,7 @@ export function AppShell({
         onQueryChange={onQueryChange}
         onNavigate={onNavigate}
       />
-      <main ref={scrollRef} className="flex-1 overflow-y-auto">
+      <main ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-5 px-8 py-8">
           {children}
         </div>

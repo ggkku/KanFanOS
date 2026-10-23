@@ -32,6 +32,8 @@ pub struct SeriesSummary {
     pub cover_version: Option<i64>,
     /// 用户手动维护的「看过遍数」。
     pub watch_count: i64,
+    /// 用户评分 0-10；None 表示未评分。
+    pub rating: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +41,24 @@ pub struct SeriesSummary {
 pub struct SeriesPage {
     pub items: Vec<SeriesSummary>,
     pub total: i64,
+}
+
+/// 配置弹窗里「上一季 / 下一季」选择目标时使用的最小信息。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesOption {
+    pub id: i64,
+    pub name: String,
+    pub category: String,
+    pub path: String,
+}
+
+/// 修复配置文件时需要的最小番剧信息。
+#[derive(Debug, Clone)]
+pub struct SeriesConfigTarget {
+    pub id: i64,
+    pub category: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +78,8 @@ pub struct SearchItem {
     pub match_preview: Option<String>,
     /// 用户手动维护的「看过遍数」。
     pub watch_count: i64,
+    /// 用户评分 0-10；None 表示未评分。
+    pub rating: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,7 +123,8 @@ const SERIES_SELECT: &str = "
              LIMIT 1) AS cover_key,
            s.cover_path,
            s.cover_version,
-           s.watch_count
+           s.watch_count,
+           s.rating
       FROM series s
 ";
 
@@ -168,6 +191,29 @@ impl Database {
             params![series_id, count],
         )?;
         Ok(count)
+    }
+
+    /// 设置用户评分（0-10）；None 表示清除评分。
+    pub fn set_series_rating(
+        &self,
+        series_id: i64,
+        rating: Option<i64>,
+    ) -> Result<Option<i64>> {
+        if let Some(value) = rating
+            && !(0..=10).contains(&value)
+        {
+            anyhow::bail!("评分必须在 0 到 10 之间");
+        }
+
+        let changed = self.conn()?.execute(
+            "UPDATE series SET rating = ?2 WHERE id = ?1",
+            params![series_id, rating],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("番剧不存在: id={series_id}");
+        }
+
+        Ok(rating)
     }
 
     /// 记录扫描中发现的档期目录，空档期同样保留。
@@ -252,6 +298,110 @@ impl Database {
         )
         .optional()?
         .with_context(|| format!("番剧不存在: id={id}"))
+    }
+
+    /// 遍历一个库里的所有番剧目录，用于批量检查/修复 kanfanos.toml。
+    pub fn list_series_config_targets(
+        &self,
+        library_id: i64,
+    ) -> Result<Vec<SeriesConfigTarget>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, category, path
+               FROM series
+              WHERE library_id = ?1
+              ORDER BY path COLLATE NOCASE",
+        )?;
+
+        let rows = stmt.query_map([library_id], |row| {
+            Ok(SeriesConfigTarget {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                path: row.get(2)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// 配置弹窗的季链接候选：按关键词过滤整个库里有视频的番剧。
+    /// 番剧可能上千部，因此始终带 LIMIT，由前端输入缩小范围。
+    pub fn search_series_options(
+        &self,
+        library_id: i64,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<SeriesOption>> {
+        let conn = self.conn()?;
+        let limit = limit.clamp(1, 500);
+        let pattern = like_pattern(query);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT s.id, s.name, s.category, s.path
+               FROM series s
+               LEFT JOIN categories c
+                 ON c.library_id = s.library_id AND c.label = s.category
+              WHERE s.library_id = ?1 AND {SERIES_HAS_EPISODES}
+                AND (
+                    ?2 = ''
+                    OR s.name LIKE ?3 ESCAPE '\\'
+                    OR s.aliases LIKE ?3 ESCAPE '\\'
+                    OR s.category LIKE ?3 ESCAPE '\\'
+                    OR s.path LIKE ?3 ESCAPE '\\'
+                )
+              ORDER BY c.sort_key DESC, s.name COLLATE NOCASE
+              LIMIT ?4"
+        ))?;
+
+        let rows = stmt.query_map(
+            params![library_id, query, pattern, limit],
+            map_series_option,
+        )?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /// 按文件夹路径找季链接目标；番剧不存在或没有视频时返回 None。
+    pub fn series_option_by_path(&self, path: &str) -> Result<Option<SeriesOption>> {
+        Ok(self
+            .conn()?
+            .query_row(
+                &format!(
+                    "SELECT s.id, s.name, s.category, s.path
+                       FROM series s
+                      WHERE s.path = ?1 AND {SERIES_HAS_EPISODES}"
+                ),
+                [path],
+                map_series_option,
+            )
+            .optional()?)
+    }
+
+    /// 配置弹窗保存后立即更新索引中的名称与别名，不必等待下一次扫描。
+    pub fn update_series_meta(
+        &self,
+        series_id: i64,
+        name: &str,
+        aliases: &str,
+        now: i64,
+    ) -> Result<()> {
+        let changed = self.conn()?.execute(
+            "UPDATE series
+                SET name = ?2, aliases = ?3, updated_at = ?4
+              WHERE id = ?1",
+            params![series_id, name, aliases, now],
+        )?;
+
+        if changed == 0 {
+            anyhow::bail!("番剧不存在: id={series_id}");
+        }
+        Ok(())
     }
 
     /// 分页返回一个档期下的番剧。
@@ -365,7 +515,8 @@ impl Database {
                         AND v.filename LIKE ?2 ESCAPE '\\'
                       ORDER BY v.filename
                       LIMIT 1) AS match_preview,
-                    s.watch_count
+                    s.watch_count,
+                    s.rating
                FROM series s
               WHERE s.library_id = ?1 AND {SERIES_HAS_EPISODES}
                 AND (
@@ -403,6 +554,7 @@ impl Database {
                     matched_episodes: row.get(9)?,
                     match_preview: row.get(10)?,
                     watch_count: row.get(11)?,
+                    rating: row.get(12)?,
                 })
             },
         )?;
@@ -483,6 +635,16 @@ fn map_series(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeriesSummary> {
         cover_path: row.get(7)?,
         cover_version: row.get(8)?,
         watch_count: row.get(9)?,
+        rating: row.get(10)?,
+    })
+}
+
+fn map_series_option(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeriesOption> {
+    Ok(SeriesOption {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        category: row.get(2)?,
+        path: row.get(3)?,
     })
 }
 
@@ -590,6 +752,105 @@ mod tests {
             .list_series_page(library.id, "2026年7月", "name", 10, 0)
             .unwrap();
         assert_eq!(by_name.items[0].name, "A番");
+
+        drop(db);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sets_and_clears_rating() {
+        let (db, dir) = temp_db("series-rating");
+        let library = db.add_library("X:\\library", "library", now_ms()).unwrap();
+        let series = add_series_with_episodes(
+            &db,
+            library.id,
+            "2026年7月",
+            "评番",
+            &["第1集.mp4"],
+        );
+
+        assert_eq!(db.get_series(series).unwrap().rating, None);
+        assert_eq!(db.set_series_rating(series, Some(0)).unwrap(), Some(0));
+        assert_eq!(db.get_series(series).unwrap().rating, Some(0));
+        assert_eq!(db.set_series_rating(series, Some(10)).unwrap(), Some(10));
+        assert_eq!(db.get_series(series).unwrap().rating, Some(10));
+
+        // 超出范围要拒绝，不能写进数据库。
+        assert!(db.set_series_rating(series, Some(11)).is_err());
+        assert!(db.set_series_rating(series, Some(-1)).is_err());
+        assert_eq!(db.get_series(series).unwrap().rating, Some(10));
+
+        assert_eq!(db.set_series_rating(series, None).unwrap(), None);
+        assert_eq!(db.get_series(series).unwrap().rating, None);
+
+        // 列表和搜索也要带上评分。
+        db.set_series_rating(series, Some(7)).unwrap();
+        let page = db
+            .list_series_page(library.id, "2026年7月", "name", 10, 0)
+            .unwrap();
+        assert_eq!(page.items[0].rating, Some(7));
+        let search = db.search_series(library.id, "评番", 10, 0).unwrap();
+        assert_eq!(search.items[0].rating, Some(7));
+
+        drop(db);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updates_meta_and_resolves_series_options() {
+        let (db, dir) = temp_db("series-options");
+        let library = db.add_library("X:\\library", "library", now_ms()).unwrap();
+
+        // 扫描时档期目录会先写入 categories；排序依赖它的 sort_key。
+        db.upsert_category(library.id, "2025年10月", now_ms())
+            .unwrap();
+        db.upsert_category(library.id, "2026年1月", now_ms())
+            .unwrap();
+
+        let first = add_series_with_episodes(
+            &db,
+            library.id,
+            "2025年10月",
+            "A季",
+            &["第1集.mp4"],
+        );
+        let second = add_series_with_episodes(
+            &db,
+            library.id,
+            "2026年1月",
+            "B季",
+            &["第1集.mp4"],
+        );
+
+        let options = db.search_series_options(library.id, "", 200).unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].name, "B季");
+        assert_eq!(options[1].name, "A季");
+
+        // 关键词匹配番剧名，也支持别名和档期。
+        let filtered = db.search_series_options(library.id, "A季", 200).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "A季");
+        assert_eq!(
+            db.search_series_options(library.id, "2025年", 200)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let by_path = db.series_option_by_path("X:\\B季").unwrap().unwrap();
+        assert_eq!(by_path.id, second);
+        assert!(db.series_option_by_path("X:\\不存在").unwrap().is_none());
+
+        db.update_series_meta(first, "A季（新）", "别名甲\n别名乙", now_ms())
+            .unwrap();
+        assert_eq!(db.get_series(first).unwrap().name, "A季（新）");
+        assert_eq!(
+            db.search_series(library.id, "别名乙", 10, 0)
+                .unwrap()
+                .total,
+            1
+        );
 
         drop(db);
         let _ = fs::remove_dir_all(dir);

@@ -43,6 +43,20 @@
 ### 其他
 
 - 原生 `<select>` 的下拉列表在 Windows 上很难统一风格，统一换成 `components/common/SelectMenu.tsx` 自定义下拉。
+- 番剧数量可能有几百上千部，季链接**不能**一次性加载成下拉：用 `SeriesPickerDialog` + 后端 `search_series_options` 按关键词查询，单次最多 200 条，输入去抖 180ms。选择器里的「无」不依赖搜索结果，加载中也要能点。
+- 选集页的配置弹窗必须通过 `createPortal` 挂到 `document.body`：详情页外层带 transform 进入动画，`position: fixed` 子元素会以动画容器为包含块，不 portal 的话遮罩盖不住整个窗口。选择器本身也是 portal，`z-[60]` 盖在配置弹窗（`z-50`）上。
+- 个人评分和奖项以 `kanfanos.toml` 为准（`rating`，-1 表示未评分；`awards` 字符串数组）。数据库 `series.rating` 只是索引：扫描时由 `scanner` 从配置同步，打分命令写配置后也会立即更新一次。注意写配置会触发文件监听重扫，这是选 toml 存储的代价（监听有去抖）。
+- 评语是前端常量 `RATING_LABELS`，每档四个字，只影响显示。`SeriesConfig::default()` 的 rating 必须是 -1，不能依赖 derived Default 的 0（0 是合法评分「粪中之粪」）。
+- 奖项输入框在选集页右上角；配置弹窗里的「添加奖项」通过 `onAddAward` 关闭弹窗并递增 `openSignal`，由 `SeriesAwards` 展开并聚焦输入框。选集页不提供第二个添加入口，奖项行也不带 ×；删除统一在配置弹窗的奖项列表里，由 `onRemoveAward` 写回 toml 并同步父组件状态。奖项不做数据库存储，只有 `get_series_config` 读取。
+- 评分 / 奖项必须放在详情页 header 的右侧列（`flex-1` 信息列 + `w-56 shrink-0` 右列），**不要**单独加一行放在 header 上方：那会把封面和选集列表整体往下推。奖项每条一行，列表 `max-h-[92px]` + 内部滚动，保证右列总高（≈158px）不超过封面高度（160px），header 不会被撑高；输入框展开时列表临时缩到 `max-h-14`。
+- 选番卡片的 hover 发光用渐变色的 `box-shadow` 三层叠加（4/10/24px），颜色由 `ratingGlowColor` 决定；卡片加 `hover:z-10` 防止被相邻卡片盖住。
+- 横向裁切统一放在外层 MAIN（`overflow-x: hidden`），页面内容不再使用 `clip-x`。这样最左侧卡片的发光能一直画进 32px 的页面内边距，不需要靠 hover 临时切换 overflow（切换 overflow 会导致布局/绘制状态变化）。辉光总范围约 28px，仍在 MAIN 的裁切边界内。
+- 「配置」按钮用 `absolute right-0 top-0` 放在返回行右侧，不参与流式布局，避免按钮高度把 header 往下推。
+- 旧的 `kanfanos.toml` 通过设置页「检查并修复」批量升级：核心逻辑在 `series_config::repair_file`。只有「名称等于文件夹名」或「缺少标准字段」时才重写；解析失败的文件会重建。原文件备份为 `kanfanos.toml.bak`（已存在则不覆盖）。修复后由命令用 `resolve` + `upsert_series` 同步数据库，名称/别名/评分立即生效。
+- 修复时要跳过“散落视频”生成的伪番剧：它们的 path 是库根目录或档期目录本身，没有独立文件夹，不应生成 `kanfanos.toml`。`is_loose_series_dir` 通过相对根目录的层级和目录名（能否解析为档期）判断。
+- 上一季 / 下一季的目标以番剧文件夹绝对路径存进各自的 `kanfanos.toml`（`previous` / `next`），读取时再按路径查数据库。这样扫描不会覆盖用户设置，目标番剧暂时失效时按钮自然消失。
+- 季链接是双向不变量：A.previous=B 时同步 B.next=A，A.next=C 时同步 C.previous=A。改链接时先解除旧目标中指向自己的反向链接；覆盖冲突链接前，也要解除被替换的旧配对（否则会留下 C.previous 仍指向 B 的残留）。只有**实际改动**的链接才做检查和同步，重复保存不会反复弹窗。
+- 反向链接冲突由 `check_season_links` 在保存前查询，前端弹 `ConfirmDialog`；选「保留原设置」仍保存本番剧的链接，只是不覆盖目标。`update_series_config` 的 `overwrite_inverse` 决定是否覆盖。
 - 最近观看页面只有 6 条是**查询上限**，`watch_history` 不裁剪；不要把它和续播数据清理混为一谈。
 - 番剧卡片封面只使用 `coverPath`（`kanfanos.toml` 或文件夹内自动发现的图片）；没有封面时显示番剧名首字占位，**不能用 `cover_key`（第一集视频缩略图）顶替**。视频缩略图只用于剧集列表和播放器。封面飞入动画对首字占位同样有效，别把 flip 限制成必须有图片 URL。
 
@@ -127,6 +141,7 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 ## Tauri 2 / 窗口
 
 - 前端的窗口 API（`setFullscreen` / `setDecorations` / `setAlwaysOnTop` / `setSkipTaskbar`）默认可能被 capability 拒绝，会报权限错误。窗口模式改动放在 Rust 侧 `apply_window_mode` 执行，不依赖前端权限。
+- Windows 下窗口处于最大化时直接 `set_fullscreen(true)`，窗口会变成显示器大小，但客户区（WebView）仍保留工作区高度，全屏底部出现任务栏高度的黑边。进入全屏前必须先 `unmaximize()`；用静态 `RESTORE_MAXIMIZED` 记住进入前是否最大化，退出全屏回窗口模式时再 `maximize()`。`is_fullscreen()` 为 true 时不要重复记录/还原，否则会把全屏状态误判成最大化。
 - 启动流程：`tauri.conf.json` 里窗口 `visible: false` → Rust 初始化时应用窗口模式 → `window.show()`。配合 `backgroundColor: "#0a0a0a"` 和 `index.html` 里 `html/body/#root` 的内联深色背景，避免启动白闪。
 - **真正的独占全屏无法实现**：WebView2 由 DWM 合成，没有 DXGI 交换链接管显示器的能力。只保留「窗口 / 全屏」两种模式；不要提供假的「独占全屏」选项。
 - `quit_app` 命令内部调用 `app.exit(0)`。退出时 WebView2 可能打印 `Failed to unregister class Chrome_WidgetWin_0`，这是关闭阶段的正常日志噪音。
