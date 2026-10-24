@@ -79,7 +79,7 @@ pnpm sidecars
 安装包输出：
 
 ```text
-src-tauri/target/release/bundle/nsis/KanFanOS_0.2.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/KanFanOS_0.2.1_x64-setup.exe
 ```
 
 > 内置 mpv 和 FFmpeg 后安装包约 153 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
@@ -278,6 +278,12 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 修复窗口最大化后切全屏底部出现任务栏高度黑边的问题
 - 设置页新增「检查并修复配置」，兼容旧版 `kanfanos.toml`
 - 版本号提升到 0.2.0
+
+**第 18 步：0.2.1 选番卡片数据同步修复**
+
+- 选集页改动评分或看过遍数后就地同步列表与搜索结果，返回选番页 hover 立即显示新值
+- 后台同步刷新时保留已渲染的卡片网格，修复 hover 奖项闪烁后消失的问题
+- 版本号提升到 0.2.1
 
 ## 已知限制
 

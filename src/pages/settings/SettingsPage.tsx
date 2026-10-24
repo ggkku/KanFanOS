@@ -498,7 +498,7 @@ export function SettingsPage({
               : "读取中…"
           }
         />
-        <InfoRow icon={Info} label="版本" value="KanFanOS 0.2.0" />
+        <InfoRow icon={Info} label="版本" value="KanFanOS 0.2.1" />
       </section>
 
       {error && (
