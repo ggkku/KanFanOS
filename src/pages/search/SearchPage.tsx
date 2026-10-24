@@ -32,7 +32,7 @@ export function SearchPage({
         </p>
       </header>
 
-      {loading ? (
+      {loading && items.length === 0 ? (
         <div className="flex flex-1 items-center justify-center py-20 text-neutral-500">
           <Loader2 size={20} className="animate-spin" />
         </div>

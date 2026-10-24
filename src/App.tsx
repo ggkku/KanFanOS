@@ -54,6 +54,21 @@ const PAGE_SIZE = 60;
 /// 「最近观看」页面最多展示的条数。
 const RECENT_LIMIT = 6;
 
+/// 选集页里评分、看过遍数或名称改动后，就地更新列表中的同一部番。
+/// 这样返回选番页时卡片 hover 立刻使用新数据，而不是等待下一次整页刷新。
+function patchSeriesSummary<T extends SeriesSummary>(
+  items: T[],
+  next: SeriesSummary,
+): T[] {
+  let changed = false;
+  const patched = items.map((item) => {
+    if (item.id !== next.id) return item;
+    changed = true;
+    return { ...item, ...next } as T;
+  });
+  return changed ? patched : items;
+}
+
 function App() {
   const [view, setView] = useState<View>({ kind: "recent" });
   // 页面切换动画：方向由左侧导航的上下顺序决定。
@@ -138,6 +153,11 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeVisible, setNoticeVisible] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  // 当前番剧列表 / 搜索结果对应的查询标识（库 + 档期 + 排序等）。
+  // 只有查询真正变化时才清空旧数据；后台刷新（文件监听、媒体处理完成）
+  // 必须保留已渲染的卡片，否则卡片会被卸载重挂，hover 缓存的奖项状态随之丢失。
+  const seriesQueryRef = useRef<string | null>(null);
+  const searchQueryRef = useRef<string | null>(null);
 
   // 启动时读取配置与档期。
   useEffect(() => {
@@ -297,12 +317,21 @@ function App() {
   // 切换档期或排序时加载第一页。
   useEffect(() => {
     if (view.kind !== "category" || settings?.libraryId == null) {
+      seriesQueryRef.current = null;
       setSeries([]);
       setSeriesTotal(0);
       return;
     }
 
     const libraryId = settings.libraryId;
+    // 查询变化时先清空，让加载态正常出现；同一查询的后台刷新不清空。
+    const queryKey = `${libraryId}:${view.category}:${sort}`;
+    if (seriesQueryRef.current !== queryKey) {
+      seriesQueryRef.current = queryKey;
+      setSeries([]);
+      setSeriesTotal(0);
+    }
+
     let disposed = false;
     setSeriesLoading(true);
 
@@ -331,10 +360,20 @@ function App() {
     const libraryId = settings?.libraryId;
 
     if (!trimmed || libraryId == null) {
+      searchQueryRef.current = null;
       setSearchItems([]);
       setSearchTotal(0);
       setSearchLoading(false);
       return;
+    }
+
+    // 关键词变化时清空旧结果；refreshKey 触发的后台刷新保留卡片，
+    // 避免 hover 中的卡片被卸载后奖项状态丢失。
+    const queryKey = `${libraryId}:${trimmed}`;
+    if (searchQueryRef.current !== queryKey) {
+      searchQueryRef.current = queryKey;
+      setSearchItems([]);
+      setSearchTotal(0);
     }
 
     let disposed = false;
@@ -882,6 +921,10 @@ function App() {
         listExtraEpisodes(selectedSeries.id),
       ]);
       setSelectedSeries(series);
+      // 列表页可能正被选集页覆盖着，但它仍是返回后要显示的数据源。
+      // 评分 / 看过遍数 / 名称在选集页改动后必须同步过去，否则返回时卡片 hover 还是旧值。
+      setSeries((items) => patchSeriesSummary(items, series));
+      setSearchItems((items) => patchSeriesSummary(items, series));
       setEpisodes(sortEpisodes(mainRows));
       setExtraEpisodes(sortEpisodes(extraRows));
       if (extraRows.length === 0) setExtrasOpen(false);
