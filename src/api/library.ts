@@ -29,6 +29,7 @@ import type {
   SeriesPage,
   SeriesSort,
   SeriesSummary,
+  SeriesVideo,
   SyncEvent,
 } from "../types/library";
 
@@ -175,6 +176,11 @@ export function getSeriesConfig(
   return invoke<SeriesConfigView>("get_series_config", { seriesId });
 }
 
+/// 番剧目录下扫描到的全部视频（供选集选择器使用）。
+export function listSeriesVideos(seriesId: number): Promise<SeriesVideo[]> {
+  return invoke<SeriesVideo[]>("list_series_videos", { seriesId });
+}
+
 export function searchSeriesOptions(
   libraryId: number,
   query: string,
@@ -206,6 +212,8 @@ export function updateSeriesConfig(
   previousId: number | null,
   nextId: number | null,
   overwriteInverse: boolean,
+  episodeMode: string,
+  episodes: string[],
 ): Promise<SeriesConfigView> {
   return invoke<SeriesConfigView>("update_series_config", {
     seriesId,
@@ -214,6 +222,8 @@ export function updateSeriesConfig(
     previousId,
     nextId,
     overwriteInverse,
+    episodeMode,
+    episodes,
   });
 }
 

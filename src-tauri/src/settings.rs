@@ -24,6 +24,48 @@ pub const SERIES_TRANSITION_FLIP: &str = "flip";
 pub const WINDOW_MODE_WINDOWED: &str = "windowed";
 pub const WINDOW_MODE_BORDERLESS: &str = "borderless";
 
+/// qBittorrent WebUI 默认地址（qBittorrent 默认监听 8080 端口）。
+pub const DEFAULT_QBITTORRENT_URL: &str = "http://127.0.0.1:8080";
+pub const DEFAULT_QBITTORRENT_USERNAME: &str = "admin";
+
+/// 使用随应用分发的 qBittorrent 实例（应用负责启停）。
+pub const QBITTORRENT_MODE_SIDECAR: &str = "sidecar";
+/// 连接用户自己运行的 qBittorrent WebUI。
+pub const QBITTORRENT_MODE_EXTERNAL: &str = "external";
+
+/// qBittorrent WebUI 连接配置。
+///
+/// 密码以明文保存，和 qBittorrent 自己的配置文件做法一致；
+/// 如果不需要远程管理，建议只监听本机地址。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QbittorrentSettings {
+    /// `sidecar`（默认，内置实例）或 `external`（外部 WebUI）。
+    #[serde(default = "default_qbittorrent_mode")]
+    pub mode: String,
+    #[serde(default = "default_qbittorrent_url")]
+    pub url: String,
+    #[serde(default = "default_qbittorrent_username")]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    /// 默认下载目录；为空时使用 qBittorrent 自己的默认位置。
+    #[serde(default)]
+    pub save_path: Option<String>,
+}
+
+impl Default for QbittorrentSettings {
+    fn default() -> Self {
+        Self {
+            mode: default_qbittorrent_mode(),
+            url: default_qbittorrent_url(),
+            username: default_qbittorrent_username(),
+            password: String::new(),
+            save_path: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -47,6 +89,9 @@ pub struct Settings {
     /// 主窗口模式：`windowed` / `borderless`。
     #[serde(default = "default_window_mode")]
     pub window_mode: String,
+    /// 内置资源页使用的 qBittorrent WebUI 连接配置。
+    #[serde(default)]
+    pub qbittorrent: QbittorrentSettings,
 }
 
 fn default_auto_watch() -> bool {
@@ -67,6 +112,26 @@ fn default_series_transition() -> String {
 
 fn default_window_mode() -> String {
     WINDOW_MODE_WINDOWED.to_string()
+}
+
+fn default_qbittorrent_mode() -> String {
+    QBITTORRENT_MODE_SIDECAR.to_string()
+}
+
+fn default_qbittorrent_url() -> String {
+    DEFAULT_QBITTORRENT_URL.to_string()
+}
+
+fn normalize_qbittorrent_mode(value: &str) -> String {
+    if value == QBITTORRENT_MODE_EXTERNAL {
+        QBITTORRENT_MODE_EXTERNAL.to_string()
+    } else {
+        QBITTORRENT_MODE_SIDECAR.to_string()
+    }
+}
+
+fn default_qbittorrent_username() -> String {
+    DEFAULT_QBITTORRENT_USERNAME.to_string()
 }
 
 /// 只接受已知值，避免配置文件被改坏后前端拿到无效样式。
@@ -105,6 +170,7 @@ impl Default for Settings {
             page_transition: default_page_transition(),
             series_transition: default_series_transition(),
             window_mode: default_window_mode(),
+            qbittorrent: QbittorrentSettings::default(),
         }
     }
 }
@@ -129,6 +195,7 @@ pub fn load(data_root: &Path) -> Result<Settings> {
     settings.page_transition = normalize_page_transition(&settings.page_transition);
     settings.series_transition = normalize_series_transition(&settings.series_transition);
     settings.window_mode = normalize_window_mode(&settings.window_mode);
+    settings.qbittorrent.mode = normalize_qbittorrent_mode(&settings.qbittorrent.mode);
     Ok(settings)
 }
 
@@ -147,6 +214,7 @@ pub fn save(data_root: &Path, settings: &Settings) -> Result<()> {
     normalized.page_transition = normalize_page_transition(&normalized.page_transition);
     normalized.series_transition = normalize_series_transition(&normalized.series_transition);
     normalized.window_mode = normalize_window_mode(&normalized.window_mode);
+    normalized.qbittorrent.mode = normalize_qbittorrent_mode(&normalized.qbittorrent.mode);
 
     let json = serde_json::to_string_pretty(&normalized)?;
     std::fs::write(&path, json)
@@ -162,7 +230,7 @@ mod tests {
     };
 
     use super::{
-        load, save, settings_file, Settings, MAX_THUMBNAIL_WIDTH,
+        load, save, settings_file, QbittorrentSettings, Settings, MAX_THUMBNAIL_WIDTH,
         MIN_THUMBNAIL_WIDTH, PAGE_TRANSITION_FADE, PAGE_TRANSITION_SLIDE,
         SERIES_TRANSITION_FLIP, SERIES_TRANSITION_RISE, WINDOW_MODE_BORDERLESS,
         WINDOW_MODE_WINDOWED,
@@ -214,6 +282,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
                 window_mode: WINDOW_MODE_BORDERLESS.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -229,6 +298,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
                 window_mode: "bogus".to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -251,6 +321,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_FLIP.to_string(),
                 window_mode: WINDOW_MODE_WINDOWED.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -266,6 +337,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: "bogus".to_string(),
                 window_mode: WINDOW_MODE_WINDOWED.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -288,6 +360,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_SLIDE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
                 window_mode: WINDOW_MODE_WINDOWED.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -303,6 +376,7 @@ mod tests {
                 page_transition: "unknown".to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
                 window_mode: WINDOW_MODE_WINDOWED.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -325,6 +399,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
                 window_mode: WINDOW_MODE_WINDOWED.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();
@@ -340,6 +415,7 @@ mod tests {
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
                 window_mode: WINDOW_MODE_WINDOWED.to_string(),
+                qbittorrent: QbittorrentSettings::default(),
             },
         )
         .unwrap();

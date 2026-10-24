@@ -43,6 +43,21 @@ pub struct SeriesConfigView {
     pub awards: Vec<String>,
     pub previous: Option<SeriesOption>,
     pub next: Option<SeriesOption>,
+    /// `auto` 或 `manual`。
+    pub episode_mode: String,
+    /// manual 模式下的选集文件（相对番剧目录）。
+    pub episodes: Vec<String>,
+}
+
+/// 选集选择器里的一个视频。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesVideoView {
+    pub path: String,
+    pub filename: String,
+    /// 相对番剧目录、`/` 分隔。
+    pub relative_path: String,
+    pub kind: String,
 }
 
 /// 自动同步反向链接时会覆盖目标已有的其它链接，需要用户确认。
@@ -256,6 +271,8 @@ pub fn repair_series_configs(
 
 /// 保存名称、别名和季链接，并立即更新数据库索引。
 /// `overwrite_inverse` 为 true 时，覆盖目标已有反向链接；为 false 时保留冲突项。
+// 命令边界直接展开字段，前端调用更直观；参数过多是预期的。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn update_series_config(
     state: State<'_, AppState>,
@@ -265,6 +282,8 @@ pub fn update_series_config(
     previous_id: Option<i64>,
     next_id: Option<i64>,
     overwrite_inverse: bool,
+    episode_mode: String,
+    episodes: Vec<String>,
 ) -> Result<SeriesConfigView, String> {
     let series = state.db.get_series(series_id).map_err(to_message)?;
     let dir = PathBuf::from(&series.path);
@@ -276,9 +295,17 @@ pub fn update_series_config(
     config.aliases = series_config::clean_aliases(&aliases);
     config.previous = target_path(&state, series_id, previous_id)?;
     config.next = target_path(&state, series_id, next_id)?;
+    config.episode_mode = series_config::normalize_episode_mode(&episode_mode);
+    config.episodes = series_config::clean_episodes(&episodes);
 
     series_config::save(&dir, &config)
         .map_err(|error| format!("写入番剧配置失败: {error}"))?;
+
+    // 立即按新的选集配置修正这个番剧的视频分类，选集页无需重扫即可更新。
+    state
+        .db
+        .reclassify_series_videos(series_id)
+        .map_err(to_message)?;
 
     state
         .db
@@ -318,7 +345,34 @@ fn config_view(
         awards: series_config::clean_list(&config.awards),
         previous: target_option(state, series_id, &config.previous)?,
         next: target_option(state, series_id, &config.next)?,
+        episode_mode: series_config::normalize_episode_mode(&config.episode_mode),
+        episodes: series_config::clean_episodes(&config.episodes),
     })
+}
+
+/// 番剧目录下扫描到的全部视频，供选集选择器使用。
+#[tauri::command]
+pub fn list_series_videos(
+    state: State<'_, AppState>,
+    series_id: i64,
+) -> Result<Vec<SeriesVideoView>, String> {
+    let rows = state
+        .db
+        .series_videos(series_id)
+        .map_err(to_message)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| SeriesVideoView {
+            relative_path: series_config::relative_path(
+                Path::new(&row.series_path),
+                Path::new(&row.path),
+            ),
+            path: row.path,
+            filename: row.filename,
+            kind: row.kind,
+        })
+        .collect())
 }
 
 fn collect_conflict(

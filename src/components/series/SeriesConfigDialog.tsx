@@ -10,12 +10,14 @@ import {
 import { errorMessage } from "../../lib/errors";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import type {
+  EpisodeMode,
   SeasonLinkConflict,
   SeriesConfigView,
   SeriesOption,
   SeriesSummary,
 } from "../../types/library";
 import { SeriesPickerDialog } from "./SeriesPickerDialog";
+import { SeriesEpisodePicker } from "./SeriesEpisodePicker";
 
 interface SeriesConfigDialogProps {
   series: SeriesSummary;
@@ -87,6 +89,11 @@ export function SeriesConfigDialog({
   );
   const [next, setNext] = useState<SeriesOption | null>(config.next);
   const [picker, setPicker] = useState<"previous" | "next" | null>(null);
+  const [episodeMode, setEpisodeMode] = useState<EpisodeMode>(
+    config.episodeMode ?? "auto",
+  );
+  const [episodes, setEpisodes] = useState<string[]>(config.episodes ?? []);
+  const [episodePickerOpen, setEpisodePickerOpen] = useState(false);
   const [conflicts, setConflicts] = useState<SeasonLinkConflict[] | null>(
     null,
   );
@@ -106,6 +113,7 @@ export function SeriesConfigDialog({
         !saving &&
         actionBusy == null &&
         picker == null &&
+        !episodePickerOpen &&
         conflicts == null
       ) {
         onClose();
@@ -114,7 +122,14 @@ export function SeriesConfigDialog({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actionBusy, conflicts, picker, saving, onClose]);
+  }, [
+    actionBusy,
+    conflicts,
+    episodePickerOpen,
+    picker,
+    saving,
+    onClose,
+  ]);
 
   const removeAward = async (name: string) => {
     if (awardBusy) return;
@@ -165,6 +180,8 @@ export function SeriesConfigDialog({
         previous?.id ?? null,
         next?.id ?? null,
         overwriteInverse,
+        episodeMode,
+        episodes,
       );
       await onChanged();
       onSaved(updated);
@@ -276,6 +293,51 @@ export function SeriesConfigDialog({
           <p className="-mt-1 text-[10px] leading-relaxed text-neutral-600">
             保存时会自动同步目标的上一季 / 下一季；目标已有其它链接时会先询问。
           </p>
+
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 px-3.5 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs text-neutral-300">选集来源</div>
+                <div className="mt-0.5 text-[11px] text-neutral-500">
+                  {episodeMode === "auto"
+                    ? "根目录视频自动成为选集"
+                    : `手动选择：${episodes.length} 个视频`}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-950 p-0.5 text-[11px]">
+                {(["auto", "manual"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setEpisodeMode(mode)}
+                    className={`rounded-md px-2 py-1 transition-colors ${
+                      episodeMode === mode
+                        ? "bg-neutral-800 text-neutral-100"
+                        : "text-neutral-500 hover:text-neutral-300"
+                    }`}
+                  >
+                    {mode === "auto" ? "自动" : "手动"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {episodeMode === "manual" && (
+              <div className="mt-2.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEpisodePickerOpen(true)}
+                  disabled={saving}
+                  className={actionButton}
+                >
+                  选择视频…
+                </button>
+                <span className="text-[11px] text-neutral-600">
+                  未选中的视频进入「其它视频」
+                </span>
+              </div>
+            )}
+          </div>
 
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 px-3.5 py-3">
             <div className="flex items-center justify-between gap-3">
@@ -394,6 +456,18 @@ export function SeriesConfigDialog({
             setPicker(null);
           }}
           onClose={() => setPicker(null)}
+        />
+      )}
+
+      {episodePickerOpen && (
+        <SeriesEpisodePicker
+          seriesId={series.id}
+          selected={episodes}
+          onConfirm={(paths) => {
+            setEpisodes(paths);
+            setEpisodePickerOpen(false);
+          }}
+          onClose={() => setEpisodePickerOpen(false)}
         />
       )}
 

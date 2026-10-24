@@ -1,3 +1,5 @@
+mod bookmarks;
+mod browser;
 mod catalog;
 mod commands;
 mod database;
@@ -5,6 +7,7 @@ mod media;
 mod autostart;
 mod paths;
 mod playback;
+mod qbittorrent;
 mod scanner;
 mod series_config;
 mod settings;
@@ -85,6 +88,8 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
         video_surface: std::sync::Mutex::new(None),
         data_root: root.clone(),
     });
+    app.manage(qbittorrent::QbState::default());
+    app.manage(qbittorrent::ManagedQbittorrent::default());
 
     // 缩略图可能位于安装目录下的自定义数据目录；配置里的 scope 只覆盖默认位置，
     // 这里按实际数据根目录再放行一次。
@@ -131,7 +136,7 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -170,6 +175,7 @@ pub fn run() {
             commands::series::get_series_awards,
             commands::series::repair_series_configs,
             commands::series::get_series_config,
+            commands::series::list_series_videos,
             commands::series::search_series_options,
             commands::series::check_season_links,
             commands::series::update_series_config,
@@ -189,7 +195,36 @@ pub fn run() {
             commands::playback::player_set_audio,
             commands::playback::set_player_cursor_visible,
             commands::playback::list_recent,
+            commands::resources::browser_open_tab,
+            commands::resources::browser_show_tab,
+            commands::resources::browser_hide_tab,
+            commands::resources::browser_set_tab_bounds,
+            commands::resources::browser_navigate_tab,
+            commands::resources::browser_close_tab,
+            commands::resources::browser_list_tabs,
+            commands::resources::browser_close_untracked,
+            commands::resources::get_qbittorrent_config,
+            commands::resources::set_qbittorrent_config,
+            commands::resources::get_qbittorrent_preferences,
+            commands::resources::set_qbittorrent_save_path,
+            commands::resources::qbittorrent_test,
+            commands::resources::qbittorrent_webui_url,
+            commands::resources::qbittorrent_set_torrent_running,
+            commands::resources::qbittorrent_list_torrents,
+            commands::bookmarks::list_bookmarks,
+            commands::bookmarks::add_bookmark,
+            commands::bookmarks::update_bookmark,
+            commands::bookmarks::remove_bookmark,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // 退出时关掉内置 qBittorrent，避免留下孤儿进程。
+        if let tauri::RunEvent::Exit = event {
+            app_handle
+                .state::<qbittorrent::ManagedQbittorrent>()
+                .stop();
+        }
+    });
 }

@@ -99,6 +99,8 @@ export interface SeriesOption {
 }
 
 /// 选集页配置弹窗的当前值。
+export type EpisodeMode = "auto" | "manual";
+
 export interface SeriesConfigView {
   name: string;
   aliases: string[];
@@ -106,6 +108,16 @@ export interface SeriesConfigView {
   awards: string[];
   previous: SeriesOption | null;
   next: SeriesOption | null;
+  episodeMode: EpisodeMode;
+  episodes: string[];
+}
+
+/// 选集选择器里的一个视频。
+export interface SeriesVideo {
+  path: string;
+  filename: string;
+  relativePath: string;
+  kind: "main" | "extra" | string;
 }
 
 /// 自动同步反向季链接时会覆盖的目标现有链接。

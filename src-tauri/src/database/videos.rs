@@ -1,7 +1,10 @@
+use std::{collections::HashMap, path::Path};
+
 use anyhow::Result;
 use rusqlite::params;
 
 use super::Database;
+use crate::series_config;
 
 /// 扫描阶段能获得的最小文件信息，元数据由后续步骤补齐。
 #[derive(Debug, Clone)]
@@ -12,8 +15,17 @@ pub struct ScannedFile {
     pub extension: String,
     pub file_size: i64,
     pub modified_at: Option<i64>,
-    /// `main` = 番剧根目录；`extra` = 子文件夹里的 CM/PV/特典。
+    /// `main` = 选集；`extra` = 其它视频。
     pub kind: String,
+}
+
+/// 选集选择器使用的番剧视频行。
+#[derive(Debug, Clone)]
+pub struct SeriesVideoRow {
+    pub path: String,
+    pub filename: String,
+    pub kind: String,
+    pub series_path: String,
 }
 
 /// 同一路径只保留一条记录；文件大小或修改时间变化时清空派生元数据，
@@ -323,8 +335,11 @@ impl Database {
         Ok(updated)
     }
 
-    /// 按文件实际所在目录修正 `kind`：番剧根目录 → main，子目录 → extra。
-    /// 旧数据库升级后没有 kind 语义，启动时跑一次即可让主选集/二级选集正确。
+    /// 按每个番剧的 `kanfanos.toml` 修正 `kind`。
+    ///
+    /// auto 模式保持旧规则（根目录 → main，子目录 → extra）；
+    /// manual 模式只把 `episodes` 里的文件作为 main，其余归入 extra。
+    /// 旧数据库升级后没有 kind 语义，启动时也会跑一次。
     pub fn reclassify_video_kinds(&self) -> Result<usize> {
         let conn = self.conn()?;
         let rows = {
@@ -344,18 +359,98 @@ impl Database {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
+        let mut configs: HashMap<String, series_config::SeriesConfig> = HashMap::new();
         let mut changed = 0;
-        for (id, path, series_path) in rows {
-            let parent = std::path::Path::new(&path)
-                .parent()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_default();
 
-            let kind = if normalize_path(&parent) == normalize_path(&series_path) {
-                "main"
-            } else {
-                "extra"
-            };
+        for (id, path, series_path) in rows {
+            let config = configs
+                .entry(series_path.clone())
+                .or_insert_with(|| series_config::load(Path::new(&series_path)));
+
+            let file = Path::new(&path);
+            let relative = series_config::relative_path(Path::new(&series_path), file);
+            let is_root_file = file
+                .parent()
+                .map(|parent| {
+                    normalize_path(&parent.to_string_lossy())
+                        == normalize_path(&series_path)
+                })
+                .unwrap_or(false);
+            let kind = series_config::classify_kind(
+                &config.episode_mode,
+                &config.episodes,
+                &relative,
+                is_root_file,
+            );
+
+            changed += conn.execute(
+                "UPDATE videos SET kind = ?2 WHERE id = ?1 AND kind <> ?2",
+                params![id, kind],
+            )?;
+        }
+
+        Ok(changed)
+    }
+
+    /// 某个番剧下所有有效视频，供选集选择器展示。
+    pub fn series_videos(&self, series_id: i64) -> Result<Vec<SeriesVideoRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT v.path, v.filename, v.kind, s.path
+               FROM videos v
+               JOIN series s ON s.id = v.series_id
+              WHERE v.series_id = ?1 AND v.status <> 'missing'
+              ORDER BY v.path",
+        )?;
+        let rows = stmt.query_map([series_id], |row| {
+            Ok(SeriesVideoRow {
+                path: row.get(0)?,
+                filename: row.get(1)?,
+                kind: row.get(2)?,
+                series_path: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 保存选集配置后，立即按新配置修正单个番剧的视频分类。
+    pub fn reclassify_series_videos(&self, series_id: i64) -> Result<usize> {
+        let conn = self.conn()?;
+        let series_path: String = conn.query_row(
+            "SELECT path FROM series WHERE id = ?1",
+            [series_id],
+            |row| row.get(0),
+        )?;
+
+        let config = series_config::load(Path::new(&series_path));
+        let rows = {
+            let mut stmt = conn.prepare(
+                "SELECT id, path FROM videos
+                  WHERE series_id = ?1 AND status <> 'missing'",
+            )?;
+            let rows = stmt.query_map([series_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut changed = 0;
+        for (id, path) in rows {
+            let file = Path::new(&path);
+            let relative = series_config::relative_path(Path::new(&series_path), file);
+            let is_root_file = file
+                .parent()
+                .map(|parent| {
+                    normalize_path(&parent.to_string_lossy())
+                        == normalize_path(&series_path)
+                })
+                .unwrap_or(false);
+            let kind = series_config::classify_kind(
+                &config.episode_mode,
+                &config.episodes,
+                &relative,
+                is_root_file,
+            );
 
             changed += conn.execute(
                 "UPDATE videos SET kind = ?2 WHERE id = ?1 AND kind <> ?2",

@@ -22,7 +22,8 @@ pnpm tauri dev
 ├── database\library.sqlite
 ├── thumbnails\
 ├── logs\
-└── config\
+├── config\
+└── qbittorrent\          # 内置 qBittorrent 的配置、种子和下载
 ```
 
 **安装到自定义目录时（release 构建）**，如果安装目录可写，数据会放在
@@ -33,7 +34,8 @@ D:\KanFanOS\data\
 ├── database\library.sqlite
 ├── thumbnails\
 ├── logs\
-└── config\
+├── config\
+└── qbittorrent\          # 内置 qBittorrent 的配置、种子和下载
 ```
 
 首次启动时，如果新的 `data` 目录里还没有数据库、而旧的
@@ -60,36 +62,41 @@ pnpm tauri build --bundles nsis
 ```
 
 构建前会自动执行 `pnpm sidecars`，把本机的 mpv / FFmpeg / FFprobe 复制到
-`src-tauri/binaries/`（文件已存在则跳过，`-Force` 可重新复制）：
+`src-tauri/binaries/`，并从官方 Release 下载 qBittorrent 5.3.0
+（校验 SHA256，需要 7-Zip 解包）。文件已存在则跳过，`--force` 可重新复制本机工具：
 
 ```powershell
 winget install --id shinchiro.mpv -e
 winget install --id Gyan.FFmpeg -e
+winget install --id 7zip.7zip -e
 pnpm sidecars
 ```
 
-这些可执行文件会作为 sidecar 随安装包分发，目标机器无需再安装或配置 PATH。
-`src-tauri/binaries/` 体积较大，不纳入版本管理。
+这些可执行文件会作为 sidecar 随安装包分发，目标机器无需再安装或配置 PATH，
+也不需要单独安装 qBittorrent。`src-tauri/binaries/` 体积较大，不纳入版本管理。
 
-安装目录里必须同时有 `mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`。缺少
+安装目录里必须同时有 `mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`、`qbittorrent.exe`。缺少
 `ffprobe`/`ffmpeg` 时应用仍能启动和播放，但视频时长与缩略图不会生成，
 界面会显示缺少工具的提示；后台处理的具体错误记录在数据目录的
 `logs\media.log`。
 
+> qBittorrent 以 GPLv3+ 分发，许可证见 `src-tauri/resources/qbittorrent-COPYING.txt`，
+> 对应源码：https://github.com/qbittorrent/qBittorrent/tree/release-5.3.0
+
 安装包输出：
 
 ```text
-src-tauri/target/release/bundle/nsis/KanFanOS_0.2.1_x64-setup.exe
+src-tauri/target/release/bundle/nsis/KanFanOS_1.2.1_x64-setup.exe
 ```
 
-> 内置 mpv 和 FFmpeg 后安装包约 153 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
+> 内置 mpv、FFmpeg 和 qBittorrent 后安装包约 200 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
 
 ## 卸载
 
-卸载程序只删除安装目录中的程序文件（`kanfanos.exe`、`mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`、`d3dcompiler_43.dll`、`uninstall.exe`）、快捷方式和注册表项。
+卸载程序只删除安装目录中的程序文件（`kanfanos.exe`、`mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`、`qbittorrent.exe`、`d3dcompiler_43.dll`、`uninstall.exe`）、快捷方式和注册表项。
 
 - **不会删除番剧根目录**（例如 `C:\KanFanOS\番`）或其中的视频：卸载器不读取 `settings.json`，也不扫描番剧目录。
-- 默认安装时数据在 `%LOCALAPPDATA%\KanFanOS`；自定义安装（如 `D:\KanFanOS`）时数据在 `<安装目录>\data`。两种情况下 `database\`、`thumbnails\`、`config\`、`logs\` 都会保留，卸载器只删自己安装的程序文件，非递归的目录删除不会动这些数据。
+- 默认安装时数据在 `%LOCALAPPDATA%\KanFanOS`；自定义安装（如 `D:\KanFanOS`）时数据在 `<安装目录>\data`。两种情况下 `database\`、`thumbnails\`、`config\`、`logs\`、`qbittorrent\` 都会保留，卸载器只删自己安装的程序文件，非递归的目录删除不会动这些数据。`qbittorrent\` 里包含内置实例的配置、种子和下载文件。
 - 卸载页的「删除应用数据」只清理 `%LOCALAPPDATA%\com.kanfanos.app`（WebView2 缓存），不会清理上面这些媒体库数据。
 - 需要彻底清理时，卸载后手动删除数据目录：默认安装删 `%LOCALAPPDATA%\KanFanOS`，自定义安装删 `<安装目录>\data`。删除前确认番剧根目录不在这些目录里面；默认的 `C:\KanFanOS\番` 是独立目录，不受影响。
 
@@ -134,11 +141,14 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
   - `rating`：个人评分 0-10；`-1` 表示未评分
   - `awards`：自由输入的奖项名称数组，例如 `["最佳动画", "年度推荐"]`
   - `previous` / `next`：上一季 / 下一季番剧文件夹的绝对路径，留空表示没有
+  - `episode_mode`：选集来源。`auto`（默认）保持旧规则；`manual` 只使用 `episodes` 列表
+  - `episodes`：manual 模式下作为选集的视频，相对番剧目录、用 `/` 分隔，例如 `["第01集.mp4", "正片/第02集.mkv"]`；未列出的视频进入「其他视频」
 - 选集页右上角「配置」弹窗可以编辑显示名、别名和上一季 / 下一季，并执行「全部标记已看完」「清除观看记录」；名称和别名会写回 `kanfanos.toml` 并立即更新索引。上一季 / 下一季通过搜索选择番剧，适合番剧数量很多的情况。
+- 同一弹窗里的「选集来源」可以切换自动 / 手动。手动模式会打开视频选择器，勾选真正属于选集的视频；未勾选的（包括下载到番剧根目录的文件）会进入「其他视频」，不会打乱选集顺序。保存后立即生效，不需要重新扫描。
 - 季链接是双向的：设置 A 的上一季为 B 时会自动把 B 的下一季设为 A（反之亦然）；改动或清除链接会解除旧配对。目标已有不同的反向链接时会弹窗确认，可选择保留或一并修改。
 - 修改配置或替换封面后，文件监听会自动同步，无需重新扫描。
 - 番剧卡片优先显示文件夹内的封面；没有封面时显示番剧名首字占位，不再用第一集缩略图顶替。
-- 番剧文件夹根目录的视频进入主选集；子文件夹里的 CM/PV/特典等进入「其他视频」二级选集，不显示集数序号。
+- 选集来源默认是自动：番剧文件夹根目录的视频进入主选集，子文件夹里的 CM/PV/特典等进入「其他视频」二级选集。下载做种的番剧可以切到手动模式，勾选真正属于选集的视频；未勾选的根目录下载文件会进入「其他视频」，不再污染选集。
 
 ## 当前进度
 
@@ -285,10 +295,19 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 后台同步刷新时保留已渲染的卡片网格，修复 hover 奖项闪烁后消失的问题
 - 版本号提升到 0.2.1
 
+**第 19 步：1.2.1 资源页与手动选集**
+
+- 新增资源页：内置多标签浏览器、收藏夹、90% 网页缩放
+- 内置 qBittorrent 5.3.0：自动连接、WebUI、下载目录、目录任务列表、单任务启动/停止、磁力与 `.torrent` 链接拦截
+- `kanfanos.toml` 新增 `episode_mode` 和 `episodes`，可以手动勾选进入选集的视频，未选中的进入「其他视频」
+- 修复最大化窗口切换全屏 / 窗口模式时窗口落到屏幕外的问题
+- 版本号提升到 1.2.1
+
 ## 已知限制
 
 - 尚未用真实的大规模视频库做完整验收，目前测试数据是 FFmpeg 生成的短视频。
 - 文件重命名后观看记录不会迁移（按路径建立索引，旧记录会变成 `missing`）。
+- 手动选集按相对路径记录，视频文件改名后会掉出选集，需要在「配置 → 选集来源」里重新勾选。
 - 旧版本在 `%LOCALAPPDATA%\KanFanOS\config\series\` 生成的 JSON 配置已废弃，可以手动删除。
 - 数据库迁移只支持升级；用新版本升级过数据库后，旧版程序会拒绝打开。回退版本前请备份数据目录和番剧目录里的 `kanfanos.toml`。
 - 0.2.0 的评分、奖项和季链接只存在 `kanfanos.toml` 中，旧版程序不识别但也不会覆盖；从配置弹窗或「检查并修复」改写文件时，手写注释和未知字段会丢失，原始内容会保留在 `kanfanos.toml.bak`。
@@ -301,6 +320,14 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 播放器动画使用 FLIP + 原生窗口逐帧同步，原生窗口仍有约一帧的 IPC / 合成延迟，极端情况下画面与控制栏可能有轻微时间差。
 - mpv 窗口按视频自身宽高比适配，黑边由网页容器提供；非方形像素或带旋转元数据的视频可能仍会在窗口内部再留边。
 - 「最近观看」只展示 6 条，但 `watch_history` 不裁剪，更早的剧集仍保留续播进度。
+- 资源页的内嵌浏览器支持多标签页：标签栏可以新建、切换、关闭；`target=_blank` 会打开新标签页。切换标签或离开资源页只会隐藏页面，不会重新加载。新标签页默认空白，不加载任何首页。
+- 收藏夹可以收藏当前页（工具栏 ★），在收藏夹菜单里快速打开，或点齿轮手动管理（新增/改标题/改地址/删除）。数据保存在数据目录的 `config\bookmarks.json`。
+- 资源页的内嵌浏览器只会拦截 `magnet:` 和 URL 以 `.torrent` 结尾的链接；网页通过跳转/查询串触发的种子下载仍走 WebView2 自己的下载器。
+- 种子由 qBittorrent 直接下载，不会携带浏览器里的 Cookie / Referer；需要登录或防盗链的站点可能添加失败。
+- 内置 qBittorrent 的下载目录可在资源页修改；默认在数据目录的 `qbittorrent\qBittorrent\downloads`，卸载应用时不会自动删除。
+- 进入资源页会自动连接 qBittorrent（内置模式会同时启动实例），右侧按钮显示当前状态：「正在连接… / 已连接 / 重试连接」。列表只显示**当前「下载到」目录下的任务**（含已停止、暂停、出错），每条任务可以单独启动/停止，每 2 秒刷新一次；连接断开三次轮询后会提示重试。
+- 需要完整功能（代理、限速、日志、RSS）时点「WebUI」，会在内嵌浏览器里**新建标签页**打开 qBittorrent 自己的 WebUI，不会顶掉当前页面。该 WebUI 只监听 `127.0.0.1` 且对 localhost 免登录，不要把它暴露到局域网。
+- 离开资源页时，内嵌浏览器和 qBittorrent 面板只是被隐藏，不会关闭：页面、滚动位置和下载列表会在返回时原样恢复。隐藏期间网页仍在后台运行，音频和网络请求不会暂停；qBittorrent 进程也保持运行，直到退出应用。
 
 ## 目录说明
 

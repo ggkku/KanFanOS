@@ -12,6 +12,7 @@ import { SeriesExtras } from "./components/series/SeriesExtras";
 import { SetupScreen } from "./components/setup/SetupScreen";
 import { CategoryPage } from "./pages/category/CategoryPage";
 import { RecentPage } from "./pages/recent/RecentPage";
+import { ResourcesPage } from "./pages/resources/ResourcesPage";
 import { SearchPage } from "./pages/search/SearchPage";
 import { SettingsPage } from "./pages/settings/SettingsPage";
 import {
@@ -427,16 +428,17 @@ function App() {
     };
   }, [view, settings?.libraryId, refreshKey, recentVersion]);
 
-  // 导航项在侧栏里的顺序：最近观看 → 各档期 → 设置。
+  // 导航项在侧栏里的顺序：最近观看 → 资源 → 各档期 → 设置。
   const navIndex = (target: View): number | null => {
     if (target.kind === "recent") return 0;
+    if (target.kind === "resources") return 1;
     if (target.kind === "category") {
       const index = categories.findIndex(
         (item) => item.key === target.category,
       );
-      return index >= 0 ? index + 1 : null;
+      return index >= 0 ? index + 2 : null;
     }
-    return categories.length + 1;
+    return categories.length + 2;
   };
 
   // 把当前页面快照固定到主滚动区域的大小，并按离开时的 scrollTop 显示。
@@ -480,7 +482,14 @@ function App() {
     const from = navIndex(view);
     const to = navIndex(next);
 
-    if (from != null && to != null && from !== to) {
+    // 离开资源页时不要生成离场快照：快照会再挂载一个 ResourcesPage，
+    // 它的恢复逻辑可能把刚隐藏的原生 webview 重新显示出来。
+    if (
+      from != null &&
+      to != null &&
+      from !== to &&
+      view.kind !== "resources"
+    ) {
       // 目标在下方时内容向上移动（新页面从下方进入），与列表滚动方向一致。
       const direction = to > from ? "up" : "down";
       setPageTransition(direction);
@@ -970,6 +979,9 @@ function App() {
         onChanged={refreshSelectedSeries}
       />
     );
+  } else if (view.kind === "resources") {
+    // 资源页不依赖媒体库，未选择番剧目录时也能使用。
+    content = <ResourcesPage />;
   } else if (settings?.libraryRoot == null) {
     content = <SetupScreen onChooseRoot={() => void chooseRoot()} />;
   } else if (query.trim().length > 0) {
@@ -1183,6 +1195,7 @@ function App() {
         onQueryChange={handleQueryChange}
         onNavigate={navigate}
         scrollRef={scrollRef}
+        wide={view.kind === "resources"}
       >
       {progress && <ScanBanner progress={progress} onCancel={() => void handleCancelScan()} />}
 

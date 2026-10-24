@@ -22,6 +22,11 @@ const COVER_STEMS: &[&str] = &["cover", "poster", "folder"];
 /// 配置文件里表示「未评分」的值。
 pub const UNRATED: i64 = -1;
 
+/// 选集来源：根目录视频自动成为选集（旧行为）。
+pub const EPISODE_MODE_AUTO: &str = "auto";
+/// 选集来源：只使用配置里的 `episodes` 列表。
+pub const EPISODE_MODE_MANUAL: &str = "manual";
+
 /// 标准配置必须包含的字段；旧文件缺少任意一项就重写补齐。
 const CONFIG_KEYS: &[&str] = &[
     "name",
@@ -31,6 +36,8 @@ const CONFIG_KEYS: &[&str] = &[
     "awards",
     "previous",
     "next",
+    "episode_mode",
+    "episodes",
 ];
 
 /// 单个配置文件修复结果。
@@ -44,6 +51,10 @@ pub struct RepairOutcome {
 
 fn unrated() -> i64 {
     UNRATED
+}
+
+fn default_episode_mode() -> String {
+    EPISODE_MODE_AUTO.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +77,12 @@ pub struct SeriesConfig {
     /// 下一季番剧文件夹的绝对路径；空字符串表示没有下一季。
     #[serde(default)]
     pub next: String,
+    /// 选集来源：`auto`（根目录视频自动成为选集）或 `manual`（只用 episodes 列表）。
+    #[serde(default = "default_episode_mode")]
+    pub episode_mode: String,
+    /// manual 模式下作为选集的视频，相对番剧目录，使用 `/` 分隔。
+    #[serde(default)]
+    pub episodes: Vec<String>,
 }
 
 impl Default for SeriesConfig {
@@ -78,6 +95,8 @@ impl Default for SeriesConfig {
             awards: Vec::new(),
             previous: String::new(),
             next: String::new(),
+            episode_mode: default_episode_mode(),
+            episodes: Vec::new(),
         }
     }
 }
@@ -89,6 +108,8 @@ pub struct ResolvedSeriesConfig {
     pub rating: Option<i64>,
     pub cover_path: Option<String>,
     pub cover_version: Option<i64>,
+    pub episode_mode: String,
+    pub episodes: Vec<String>,
 }
 
 /// 读取（必要时生成）配置，并解析出最终用于数据库的值。
@@ -234,6 +255,77 @@ pub fn resolved_rating(config: &SeriesConfig) -> Option<i64> {
     (0..=10).contains(&config.rating).then_some(config.rating)
 }
 
+/// 只接受已知的选集模式。
+pub fn normalize_episode_mode(value: &str) -> String {
+    if value.trim() == EPISODE_MODE_MANUAL {
+        EPISODE_MODE_MANUAL.to_string()
+    } else {
+        EPISODE_MODE_AUTO.to_string()
+    }
+}
+
+/// 规范化相对路径：统一 `/`、去掉 `./` 前缀和首尾空白。
+pub fn normalize_relative(path: &str) -> String {
+    let mut value = path.trim().replace('\\', "/");
+    while let Some(rest) = value.strip_prefix("./") {
+        value = rest.to_string();
+    }
+    value.trim_start_matches('/').to_string()
+}
+
+/// 去掉空项和重复项（Windows 下路径大小写不敏感）。
+pub fn clean_episodes(paths: &[String]) -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::new();
+
+    for path in paths {
+        let normalized = normalize_relative(path);
+        if normalized.is_empty()
+            || cleaned
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(&normalized))
+        {
+            continue;
+        }
+        cleaned.push(normalized);
+    }
+
+    cleaned
+}
+
+/// 视频文件相对番剧目录的路径，统一成 `/` 分隔。
+pub fn relative_path(series_dir: &Path, file: &Path) -> String {
+    file.strip_prefix(series_dir)
+        .map(|path| normalize_relative(&path.to_string_lossy()))
+        .unwrap_or_else(|_| normalize_relative(&file.to_string_lossy()))
+}
+
+pub fn is_selected_episode(episodes: &[String], relative: &str) -> bool {
+    let relative = normalize_relative(relative);
+    episodes
+        .iter()
+        .any(|path| path.eq_ignore_ascii_case(&relative))
+}
+
+/// 根据配置决定视频归入选集（`main`）还是其它视频（`extra`）。
+pub fn classify_kind(
+    episode_mode: &str,
+    episodes: &[String],
+    relative: &str,
+    is_root_file: bool,
+) -> &'static str {
+    if normalize_episode_mode(episode_mode) == EPISODE_MODE_MANUAL {
+        if is_selected_episode(episodes, relative) {
+            "main"
+        } else {
+            "extra"
+        }
+    } else if is_root_file {
+        "main"
+    } else {
+        "extra"
+    }
+}
+
 fn build(
     series_dir: &Path,
     folder_name: &str,
@@ -254,6 +346,8 @@ fn build(
         rating,
         cover_path,
         cover_version,
+        episode_mode: normalize_episode_mode(&config.episode_mode),
+        episodes: clean_episodes(&config.episodes),
     }
 }
 
@@ -299,7 +393,14 @@ fn render(config: &SeriesConfig) -> String {
          \n\
          # 上一季 / 下一季番剧文件夹的绝对路径；留空表示没有\n\
          previous = \"{}\"\n\
-         next = \"{}\"\n",
+         next = \"{}\"\n\
+         \n\
+         # 选集来源：auto = 根目录视频自动成为选集；manual = 只使用下面的 episodes 列表\n\
+         episode_mode = \"{}\"\n\
+         \n\
+         # manual 模式下作为选集的视频，相对本文件夹，用 / 分隔；\n\
+         # 未列出的视频会进入「其它视频」，文件本身不会被移动或删除\n\
+         episodes = [{}]\n",
         escape_toml(&config.name),
         aliases,
         escape_toml(&config.cover),
@@ -307,6 +408,8 @@ fn render(config: &SeriesConfig) -> String {
         awards,
         escape_toml(&config.previous),
         escape_toml(&config.next),
+        normalize_episode_mode(&config.episode_mode),
+        render_list(&clean_episodes(&config.episodes)),
     )
 }
 
@@ -573,6 +676,8 @@ mod tests {
             awards: vec!["最佳动画".to_string(), "年度推荐".to_string()],
             previous: "X:\\上一季".to_string(),
             next: "X:\\下一季".to_string(),
+            episode_mode: super::EPISODE_MODE_MANUAL.to_string(),
+            episodes: vec!["第01集.mp4".to_string()],
         };
 
         save(&dir, &config).unwrap();
@@ -585,8 +690,55 @@ mod tests {
         assert_eq!(loaded.awards, vec!["最佳动画", "年度推荐"]);
         assert_eq!(loaded.previous, "X:\\上一季");
         assert_eq!(loaded.next, "X:\\下一季");
+        assert_eq!(loaded.episode_mode, super::EPISODE_MODE_MANUAL);
+        assert_eq!(loaded.episodes, vec!["第01集.mp4"]);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn episode_mode_defaults_to_auto() {
+        let dir = temp_series("episode-mode");
+        fs::write(dir.join(CONFIG_FILE), "name = \"\"\n").unwrap();
+        let config = load(&dir);
+        assert_eq!(config.episode_mode, super::EPISODE_MODE_AUTO);
+        assert!(config.episodes.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manual_mode_classifies_selected_paths() {
+        use super::{classify_kind, clean_episodes, EPISODE_MODE_AUTO, EPISODE_MODE_MANUAL};
+
+        let episodes = clean_episodes(&[
+            "./第01集.mp4".to_string(),
+            "SP\\特典.mkv".to_string(),
+            "sp/特典.mkv".to_string(),
+        ]);
+        assert_eq!(episodes, vec!["第01集.mp4", "SP/特典.mkv"]);
+
+        assert_eq!(
+            classify_kind(EPISODE_MODE_MANUAL, &episodes, "第01集.mp4", true),
+            "main"
+        );
+        assert_eq!(
+            classify_kind(EPISODE_MODE_MANUAL, &episodes, "SP/特典.mkv", false),
+            "main"
+        );
+        assert_eq!(
+            classify_kind(EPISODE_MODE_MANUAL, &episodes, "下载的种子.mp4", true),
+            "extra"
+        );
+
+        // auto 模式保持旧行为。
+        assert_eq!(
+            classify_kind(EPISODE_MODE_AUTO, &episodes, "下载的种子.mp4", true),
+            "main"
+        );
+        assert_eq!(
+            classify_kind(EPISODE_MODE_AUTO, &episodes, "SP/特典.mkv", false),
+            "extra"
+        );
     }
 
     #[test]

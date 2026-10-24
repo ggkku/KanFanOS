@@ -165,6 +165,35 @@ pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), Strin
             .set_decorations(true)
             .map_err(|error| error.to_string())?;
 
+        // 某些情况下全屏/装饰切换后窗口会落在屏幕外（Windows 用
+        // -16000 表示隐藏窗口），这里检查一次并居中恢复。
+        let offscreen = window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .map(|monitor| {
+                let area = monitor.work_area();
+                let position = window.outer_position().unwrap_or_default();
+                let size = window.outer_size().unwrap_or_default();
+                let right = position.x.saturating_add(size.width as i32);
+                let bottom = position.y.saturating_add(size.height as i32);
+                let monitor_right = area.position.x.saturating_add(area.size.width as i32);
+                let monitor_bottom = area.position.y.saturating_add(area.size.height as i32);
+                right <= area.position.x
+                    || bottom <= area.position.y
+                    || position.x >= monitor_right
+                    || position.y >= monitor_bottom
+            })
+            // 窗口完全在屏幕外时可能定位不到 monitor，按异常处理。
+            .unwrap_or(true);
+
+        if offscreen {
+            window
+                .set_size(tauri::LogicalSize::new(1180.0, 780.0))
+                .map_err(|error| error.to_string())?;
+            window.center().map_err(|error| error.to_string())?;
+        }
+
         // 从全屏返回时恢复进入前的最大化状态。
         if RESTORE_MAXIMIZED.swap(false, Ordering::SeqCst) {
             window.maximize().map_err(|error| error.to_string())?;
@@ -178,6 +207,12 @@ pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), Strin
                 window.unmaximize().map_err(|error| error.to_string())?;
             }
             RESTORE_MAXIMIZED.store(was_maximized, Ordering::SeqCst);
+
+            // 必须在进入全屏前去掉装饰。先全屏再 set_decorations
+            // 在最大化状态下会让窗口丢失位置和尺寸（落到屏幕外）。
+            window
+                .set_decorations(false)
+                .map_err(|error| error.to_string())?;
         }
 
         window.set_fullscreen(true).map_err(|error| error.to_string())?;
@@ -186,9 +221,6 @@ pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), Strin
             .map_err(|error| error.to_string())?;
         window
             .set_skip_taskbar(false)
-            .map_err(|error| error.to_string())?;
-        window
-            .set_decorations(false)
             .map_err(|error| error.to_string())?;
         let _ = window.set_focus();
     }

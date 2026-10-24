@@ -142,6 +142,7 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 
 - 前端的窗口 API（`setFullscreen` / `setDecorations` / `setAlwaysOnTop` / `setSkipTaskbar`）默认可能被 capability 拒绝，会报权限错误。窗口模式改动放在 Rust 侧 `apply_window_mode` 执行，不依赖前端权限。
 - Windows 下窗口处于最大化时直接 `set_fullscreen(true)`，窗口会变成显示器大小，但客户区（WebView）仍保留工作区高度，全屏底部出现任务栏高度的黑边。进入全屏前必须先 `unmaximize()`；用静态 `RESTORE_MAXIMIZED` 记住进入前是否最大化，退出全屏回窗口模式时再 `maximize()`。`is_fullscreen()` 为 true 时不要重复记录/还原，否则会把全屏状态误判成最大化。
+- `set_decorations(false)` 必须在 `set_fullscreen(true)` **之前**调用。顺序反过来时，在最大化状态下切换会把窗口丢到屏幕外（Windows 的 -16000 隐藏位置，尺寸缩成 157×25），切回窗口模式也不会自行恢复。回窗口模式时再加一次「是否完全在屏幕外」的检查，异常时 `set_size(1180×780)` + `center()` 兜底。
 - 启动流程：`tauri.conf.json` 里窗口 `visible: false` → Rust 初始化时应用窗口模式 → `window.show()`。配合 `backgroundColor: "#0a0a0a"` 和 `index.html` 里 `html/body/#root` 的内联深色背景，避免启动白闪。
 - **真正的独占全屏无法实现**：WebView2 由 DWM 合成，没有 DXGI 交换链接管显示器的能力。只保留「窗口 / 全屏」两种模式；不要提供假的「独占全屏」选项。
 - `quit_app` 命令内部调用 `app.exit(0)`。退出时 WebView2 可能打印 `Failed to unregister class Chrome_WidgetWin_0`，这是关闭阶段的正常日志噪音。
@@ -152,7 +153,12 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 
 - `watch_history` 不裁剪；最近观看的 `LIMIT 6` 只影响展示。
 - 最近观看按 `series_id` 用 `ROW_NUMBER()` 取每部番最近打开的一集；不要在 SQL 里按视频逐条返回，前端要进入选集页而不是直接开播放器。
-- `videos.kind` 区分 `main`（番剧根目录）和 `extra`（子目录 CM/PV）。扫描时按 `path.parent() == series_dir` 分类；旧库在 `Database::open` 后用 `reclassify_video_kinds` 按实际路径修正，避免升级后必须重扫。
+- `videos.kind` 只有 `main`（选集）和 `extra`（其他视频）。分类由每个番剧的 `kanfanos.toml` 决定：
+  - `episode_mode = "auto"`（默认）：根目录视频 → `main`，子目录视频 → `extra`（旧行为）
+  - `episode_mode = "manual"`：只有 `episodes` 列表里的相对路径 → `main`，其余一律 → `extra`
+- 扫描、`Database::open` 里的 `reclassify_video_kinds`、以及保存配置后的 `reclassify_series_videos` 共用 `series_config::classify_kind`。启动时的重新分类会按番剧读取配置，不会覆盖手动选择。
+- `episodes` 使用相对番剧目录、`/` 分隔的路径，比较时忽略大小写。文件改名后会掉出选集（变成 `extra`），需要在选择器里重新勾选；配置里残留的旧路径不会被误当作选集。
+- 保存选集配置后立即调用 `reclassify_series_videos` 更新数据库，选集页通过现有的 `onChanged` 刷新，不需要重扫。
 - `episode_count` 只统计 `kind='main'`；「其他视频」数量只统计 `kind='extra'`。
 - `剧场版` 特判在 `catalog.rs`：`MOVIE_CATEGORY`、`is_movie_category`、`schedule_sort_key` 返回 `i64::MAX` 保证排在侧栏最上方。扫描器把顶层 `剧场版/` 当分类，子目录按影片处理。
 - settings.json 新增字段都有 serde 默认值，读取和保存时都会规范化（页面动画、选集动画、窗口模式），旧配置不会产生非法值。
@@ -162,6 +168,46 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 缩略图不在静态 asset scope 里时，`initialize` 会按实际 `data_root/thumbnails` 额外调用 `allow_directory`；新增数据目录逻辑时不要漏掉这一步。
 - WebView2 的数据目录仍是 `%LOCALAPPDATA%\com.kanfanos.app`（Tauri 的 `app_local_data_dir`），不跟随 `data_root`；所以即使数据迁到 D，C 盘仍有一百多 MB 的 WebView2 缓存。
 - `logs\mpv-<剧集 id>.log` 每个剧集一份，播放时覆盖写，目前不会自动清理；大库长期使用会累积，排查数据目录占用时先看 `logs\`。
+
+## 资源页（内嵌浏览器 + qBittorrent，PoC）
+
+- 内嵌浏览器用 Tauri 的多 webview：`Window::add_child(WebviewBuilder, ...)`，必须在 `tauri` 上启用 `unstable` feature。主 webview 的 label 是 `main`，每个标签页一个子 webview，label 为 `browser-<id>`（id 由后端自增分配）。
+- 子 webview 是**原生子窗口**，永远画在主 WebView 之上，不会跟随 DOM 层级。页内其他浮层/弹窗也无法盖住它。
+- 切换标签页和离开资源页都**不销毁 webview**：`browser_hide_tab` 把它移到 `(-20000,-20000)` 并缩成 1x1，焦点还给主 webview；页面状态（滚动、表单、播放）全部保留。恢复时 `browser_show_tab` 更新位置和大小，返回 `false` 才说明 webview 已不存在。
+- 后端用 `HIDDEN_TABS` 记录隐藏中的标签页，`set_tab_bounds` 遇到隐藏标签直接返回。`hide` / `show` / `set_bounds` 共用一把锁串行化，否则切页时布局变化触发的迟到定位会把 webview 重新拉回可见区域（表现为浏览器一直盖在其他页面上）。
+- 离开资源页时 `App::navigate` 不生成离场快照：快照会再挂载一个 `ResourcesPage`，它的恢复逻辑同样可能把刚隐藏的 webview 显示出来。
+- **孤儿 webview 兜底**：界面状态丢失、关闭失败或重复实例可能留下没人跟踪的 `browser-*` webview，它们会保持全尺寸并盖住所有页面。后端提供 `browser_list_tabs` 和 `browser_close_untracked(keep)`；资源页在**进入和离开**时都按当前标签列表清理未跟踪的 webview，`closeTab` / 恢复失败时也会补一次。排查时可以通过 CDP 读 `window.__kanfanosTabId` 确认每个 webview 的标签 id。
+- 资源页的界面状态（地址、标签页列表、当前标签 id、qBittorrent 版本、种子列表、下载目录）存在 `ResourcesPage` 的模块级 `sessionCache` 里；组件卸载后重新进入时从这里恢复。恢复定位要等页面切换动画结束（当前 380ms），否则 `getBoundingClientRect` 会拿到动画中的 transform 矩形。
+- 隐藏的 webview 仍在后台运行，音频、网络请求不会暂停；标签页一旦创建就常驻到应用退出或手动关闭。
+- 标签页标题和 URL 由后端 `browser-tab-updated` 事件推送（`on_document_title_changed` + `on_page_load(Finished)`）；`target=_blank` / `window.open` 发 `browser-new-tab` 事件，前端据此新建标签页。地址栏只在输入框没有焦点时才跟随事件更新，避免覆盖用户正在输入的内容。
+- **没有默认首页**：新建标签页或空地址点「打开」时，后端把空字符串解析成 `about:blank`（不加载任何网站）。地址栏把 `about:blank` 显示为空，标签栏显示「新标签页」，空白页不能收藏。
+- **不要在同步命令里调用 `add_child`**：它内部 `run_on_main_thread` + 同步等待，同步命令会占住主线程，表现为点击后一直卡在“打开中”、子 webview 停在 `about:blank`。浏览器命令必须写成 `async fn`，并用 `tauri::async_runtime::spawn_blocking` 包住，主线程才能执行创建闭包。
+- `add_child` / `set_position` / `set_size` 收的是**逻辑像素**（前端 CSS px 直接传），Tauri 自己乘缩放因子；不要套用 `playback::scaled_rect` 那套物理像素换算。
+- 原生窗口不随 DOM 布局移动：布局、窗口大小、滚动变化时都要重新 `browser_set_tab_bounds`。当前用 `ResizeObserver` + `resize` + 捕获阶段 `scroll`。
+- 网页默认用 90% 缩放（`browser::PAGE_ZOOM`），在创建和每次 `open` / `navigate` 时调用 `Webview::set_zoom`。WebUI 页面同样适用；改缩放比例只改这个常量。
+- 资源页通过 `AppShell` 的 `wide` 属性跳过 `max-w-6xl`，最大化窗口时左右不再留大片空白；其他页面保持原宽度。资源页自己的高度用 `calc(100vh - 3rem)` 对应 `py-6`。
+- 浏览器区域不锁比例，直接铺满右侧剩余空间；右侧 qBittorrent 面板固定 `w-60`（240px）。
+- 下载路径用 `truncate` + `[direction:rtl] text-left` 省略开头、保留结尾。Windows 路径里的 `\` 是中性字符，被 LTR 字母包围时不会打乱顺序。
+- 只允许 http/https；`target=_blank` 和 `window.open` 通过 `on_new_window` 交给前端开新标签页（`NewWindowResponse::Deny`），避免弹出不受控的顶层窗口。
+- 收藏夹的菜单和「管理收藏夹」弹窗是 HTML 层，会被原生 webview 盖住；打开时先把当前标签页隐藏（`overlayOpen`），关闭后按当前布局恢复。其他任何需要覆盖浏览器区域的 React 弹窗也要遵守这条。
+- 收藏夹保存在 `<data_root>\config\bookmarks.json`。地址会补全协议、规范化后按 URL 去重；重复收藏同一地址只更新标题。新增/修改/删除接口都返回完整列表，前端直接替换状态。
+- 磁力链接（`magnet:`）和 URL 以 `.torrent` 结尾的链接分别由 `on_navigation` / `on_new_window` / `on_download` 拦截：回调返回 `false` 取消 WebView2 自己的导航/下载，再在后台任务里调用 qBittorrent API 添加，完成后发 `qbittorrent-torrent` 事件给前端刷新列表。`add_child` 的构建回调必须是同步的，所以网络请求只能另起异步任务，不能在回调里 `await`。
+- 带查询串或跳转的种子下载（例如 `download.php?id=...`）无法仅凭 URL 判断，目前不拦截，仍由 WebView2 下载。
+- 下载目录存在 `settings.json` 的 `qbittorrent.savePath`：内置实例启动后通过 `/app/setPreferences` 应用；运行中修改目录时直接调用同一个接口。为空表示使用 qBittorrent 默认目录。
+- qBittorrent 默认走**内置 sidecar**：`qbittorrent/managed.rs` 启动随包分发的 `qbittorrent.exe`，使用 `--profile=<data_root>\qbittorrent`、`--webui-port=<随机空闲端口>`、`--no-splash --confirm-legal-notice`。实例只监听 `127.0.0.1`，退出应用时先 POST `/api/v2/app/shutdown`，5 秒未退出再 kill。
+- qBittorrent 的 WebUI **即使开启 localhost 免登录也必须配置非空密码哈希**才会启动（日志里的“未设置凭据”）。托管配置 `<profile>\qBittorrent\config\qBittorrent.ini` **只在首次启动时写入**，之后保留 qBittorrent 自己的配置，这样用户在 WebUI 里改的代理、限速等设置不会在下次启动时被覆盖。`Password_PBKDF2` 的格式是 `base64(salt):base64(PBKDF2-HMAC-SHA512(password, salt, 100000, 64B))`；`LocalHostAuth=false`，所以内置模式不需要登录（登录接口会返回 204 空响应）。
+- WebUI 端口每次启动随机分配（`--webui-port`），qBittorrent 会把它写回自己的配置；前端通过 `qbittorrent_webui_url` 命令取当前地址，右侧「WebUI」按钮用 `newTab` 在内嵌浏览器里**新开标签页**打开完整界面，不顶掉当前页面。因为 `LocalHostAuth=false`，任何本机进程都能控制这个 WebUI，所以只监听 `127.0.0.1`。
+- 右侧列表只显示**当前下载目录下的任务**：每次轮询先读 `/app/preferences` 的 `save_path`，再用 `/torrents/info` 拉取全部任务，在 Rust 侧只按 `save_path` 过滤（忽略大小写、斜杠和末尾分隔符差异）。不区分状态，已停止、暂停、出错的任务也会显示；也不使用 qBittorrent 的 `filter=active`（它只返回当前有传输速率的任务）。
+- `qbittorrent_list_torrents` 返回 `{ savePath, torrents }`。用户在界面里换目录时先立即清空列表、暂停轮询并递增一个 epoch，丢弃切换前发出、切换后才返回的旧结果；等新目录的列表读回来再填充。外部（WebUI）改了目录时，轮询发现 `savePath` 变化也会同步「下载到」显示并替换列表。
+- 每条任务的启动/停止走 `/api/v2/torrents/start` 与 `/stop`（form 字段 `hashes`）。停止态（`stoppedDL/stoppedUP/pausedDL/pausedUP/error/missingFiles`）显示「启动」，其余显示「停止」。点击后先乐观更新状态，600ms 再轮询校正；失败用面板顶部的提示条显示，不替换整个任务列表。
+- 右侧种子列表在页面可见时每 2 秒轮询一次；面板上的状态、进度和速度不是事件推送，离开资源页就停止轮询。
+- 资源页每次进入都会自动连接 qBittorrent（`autoConnect` → `refresh`）：内置模式会顺手拉起 sidecar。已经连接过（`sessionCache.qbVersion` 有值）时只做后台刷新，不闪「正在连接…」。
+- 连接按钮同时是状态指示：`正在连接…`（转圈、禁用）→ `已连接`（绿色勾）或 `重试连接`（失败后）。轮询连续 3 次失败会清掉已连接状态并显示错误，让用户能看出连接断了。
+- qBittorrent 是 GUI 程序，官方 Windows 包没有无界面模式：启动后通过 Win32 `EnumWindows` 按 PID 隐藏它的顶层窗口，并在一段时间内重复隐藏（窗口可能晚于 WebUI 就绪创建）。
+- 外部 WebUI 模式仍然保留（`settings.json` 的 `qbittorrent.mode = "external"`）。登录是 `POST /api/v2/auth/login`（form），必须带 `Origin` / `Referer`，否则 403；SID 由 reqwest 的 cookie store 保存。密码明文存在 `settings.json`，与 qBittorrent 自身配置的做法一致。
+- 会话缓存放在 `QbState`，连接参数或模式变化时 `invalidate`；请求遇到 403 视为 SID 过期，丢弃缓存后重试一次。
+- 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
+- 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
 
 ## 图标
 

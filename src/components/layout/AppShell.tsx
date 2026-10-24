@@ -13,6 +13,8 @@ interface AppShellProps {
   onNavigate: (view: View) => void;
   /** 主滚动容器，用于从选集页返回时恢复位置。 */
   scrollRef?: RefObject<HTMLElement | null>;
+  /** 资源页需要铺满宽度，不套 `max-w-6xl`。 */
+  wide?: boolean;
   children: ReactNode;
 }
 
@@ -25,6 +27,7 @@ export function AppShell({
   onQueryChange,
   onNavigate,
   scrollRef,
+  wide = false,
   children,
 }: AppShellProps) {
   return (
@@ -39,7 +42,13 @@ export function AppShell({
         onNavigate={onNavigate}
       />
       <main ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="mx-auto flex min-h-full max-w-6xl flex-col gap-5 px-8 py-8">
+        <div
+          className={
+            wide
+              ? "mx-auto flex min-h-full w-full flex-col gap-5 px-6 py-6"
+              : "mx-auto flex min-h-full max-w-6xl flex-col gap-5 px-8 py-8"
+          }
+        >
           {children}
         </div>
       </main>
