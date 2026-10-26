@@ -11,11 +11,16 @@ import {
   Info,
   Power,
   RefreshCw,
+  Server,
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { SelectMenu } from "../../components/common/SelectMenu";
+import {
+  getQbittorrentConfig,
+  setQbittorrentAdvanced,
+} from "../../api/resources";
 import {
   clearThumbnailCache,
   getCacheStats,
@@ -122,6 +127,21 @@ export function SettingsPage({
   const [repairResult, setRepairResult] =
     useState<ConfigRepairSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [qbAdvanced, setQbAdvanced] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+    void getQbittorrentConfig()
+      .then((config) => {
+        if (!disposed) setQbAdvanced(config.advanced);
+      })
+      .catch(() => {
+        // 读取失败时保持隐藏，资源页仍可用默认内置实例。
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -162,6 +182,16 @@ export function SettingsPage({
     try {
       const next = await setAutoStart(!settings.autoStart);
       onSettingsChange(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const toggleQbAdvanced = async () => {
+    setError(null);
+    try {
+      const next = await setQbittorrentAdvanced(!qbAdvanced);
+      setQbAdvanced(next.advanced);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -372,6 +402,25 @@ export function SettingsPage({
         </div>
 
         <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <Server size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">
+            qBittorrent
+          </div>
+          <div className="min-w-0 flex-1 text-xs text-neutral-300">
+            {qbAdvanced
+              ? "高级连接设置已显示 · 可在资源页切换外部 WebUI"
+              : "高级连接设置已隐藏 · 普通使用无需配置"}
+          </div>
+          <button
+            type="button"
+            onClick={() => void toggleQbAdvanced()}
+            className={actionButton}
+          >
+            {qbAdvanced ? "隐藏" : "显示"}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
           <Image size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">
             缩略图宽度
@@ -392,7 +441,7 @@ export function SettingsPage({
           <ArrowUpDown size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">页面动画</div>
           <SelectMenu
-            value={settings?.pageTransition ?? "fade"}
+            value={settings?.pageTransition ?? "slide"}
             options={PAGE_TRANSITION_OPTIONS}
             onChange={(transition) => void changePageTransition(transition)}
             ariaLabel="页面动画"
@@ -406,7 +455,7 @@ export function SettingsPage({
           <AppWindow size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">窗口模式</div>
           <SelectMenu
-            value={settings?.windowMode ?? "windowed"}
+            value={settings?.windowMode ?? "borderless"}
             options={WINDOW_MODE_OPTIONS}
             onChange={(mode) => void changeWindowMode(mode)}
             ariaLabel="窗口模式"
@@ -417,7 +466,7 @@ export function SettingsPage({
           <Clapperboard size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">选集动画</div>
           <SelectMenu
-            value={settings?.seriesTransition ?? "rise"}
+            value={settings?.seriesTransition ?? "flip"}
             options={SERIES_TRANSITION_OPTIONS}
             onChange={(transition) =>
               void changeSeriesTransition(transition)

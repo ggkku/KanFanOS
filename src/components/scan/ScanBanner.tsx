@@ -8,7 +8,7 @@ interface ScanBannerProps {
 
 export function ScanBanner({ progress, onCancel }: ScanBannerProps) {
   return (
-    <div className="rounded-lg border border-indigo-900/60 bg-indigo-950/30 px-4 py-3">
+    <div className="rounded-lg border border-indigo-900/60 bg-indigo-950/95 px-4 py-3 shadow-2xl backdrop-blur-md">
       <div className="flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-2 text-xs text-indigo-300">
           <Loader2 size={13} className="shrink-0 animate-spin" />

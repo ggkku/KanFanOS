@@ -1,12 +1,16 @@
 //! 资源页命令：内嵌浏览器与 qBittorrent WebUI。
 
-use anyhow::Result as AnyResult;
+use std::{fs, path::{Path, PathBuf}, time::Duration};
+
+use anyhow::{bail, Context, Result as AnyResult};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     browser::{self, BrowserRect},
     qbittorrent::{self, Endpoint, ManagedQbittorrent, QbState, TorrentInfo},
+    series_config::{self, SeriesConfig},
     settings::{self, QbittorrentSettings, QBITTORRENT_MODE_EXTERNAL},
     state::AppState,
 };
@@ -19,6 +23,7 @@ pub struct QbittorrentConfig {
     pub username: String,
     pub password: String,
     pub save_path: Option<String>,
+    pub advanced: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +36,510 @@ pub struct QbittorrentStatus {
 #[serde(rename_all = "camelCase")]
 pub struct QbittorrentPreferences {
     pub save_path: String,
+}
+
+/// 网页图片保存结果；子 webview 的 IPC 不可用时由代理导航触发。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSavedEvent {
+    pub ok: bool,
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 以网页选中文字创建文件夹的结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderCreatedEvent {
+    pub ok: bool,
+    pub path: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 下载目录被删除/移走时通知前端弹警告。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadDirMissingEvent {
+    pub path: String,
+}
+
+#[tauri::command]
+pub fn browser_create_folder(app: AppHandle, text: String) -> Result<String, String> {
+    let path = create_download_folder(&app, &text)
+        .map_err(to_message)?;
+    let path_string = path.to_string_lossy().into_owned();
+    let _ = app.emit(
+        "browser-folder-created",
+        FolderCreatedEvent {
+            ok: true,
+            path: Some(path_string.clone()),
+            error: None,
+        },
+    );
+    Ok(path_string)
+}
+
+/// 供浏览器 on_navigation 的建文件夹代理调用。
+pub(crate) fn spawn_browser_folder_create(app: AppHandle, text: String) {
+    tauri::async_runtime::spawn(async move {
+        let result = create_download_folder(&app, &text);
+        let event = match result {
+            Ok(path) => FolderCreatedEvent {
+                ok: true,
+                path: Some(path.to_string_lossy().into_owned()),
+                error: None,
+            },
+            Err(error) => FolderCreatedEvent {
+                ok: false,
+                path: None,
+                error: Some(format!("{error:#}")),
+            },
+        };
+        let _ = app.emit("browser-folder-created", event);
+    });
+}
+
+fn create_download_folder(app: &AppHandle, text: &str) -> AnyResult<PathBuf> {
+    let directory = ensure_download_dir(app)?;
+
+    let name = sanitize_folder_name(text).context("选中文字不能作为文件夹名")?;
+    let path = unique_directory(&directory, &name);
+    fs::create_dir(&path)
+        .with_context(|| format!("创建文件夹失败：{}", path.display()))?;
+
+    // 文件夹名做了 Windows 合法化；如果原文含非法字符，用配置里的
+    // name 保留原始显示名（只去掉换行等控制字符）。没有非法字符时
+    // name 留空，让程序直接使用文件夹名。
+    let display_name = config_display_name(text);
+    let config_name = if contains_invalid_filename_char(&display_name) {
+        display_name
+    } else {
+        String::new()
+    };
+    let config = SeriesConfig {
+        name: config_name,
+        ..SeriesConfig::default()
+    };
+    if let Err(error) = series_config::save(&path, &config) {
+        let _ = fs::remove_dir(&path);
+        return Err(error)
+            .with_context(|| format!("写入 {} 失败", series_config::CONFIG_FILE));
+    }
+
+    Ok(path)
+}
+
+fn sanitize_folder_name(text: &str) -> Option<String> {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
+        "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+
+    // 用一个内部标记表示“换行/制表符等硬空白”，它和旁边的普通空格
+    // 一起整段删除，避免换行处留下空格。
+    const HARD_SPACE: char = '\u{0}';
+
+    let mut raw = String::new();
+    for ch in text.chars() {
+        if ch.is_control() || (ch.is_whitespace() && ch != ' ') {
+            raw.push(HARD_SPACE);
+        } else if ch == ' ' {
+            raw.push(' ');
+        } else if is_invalid_filename_char(ch) {
+            // 非法文件名字符用普通空格替代。
+            raw.push(' ');
+        } else {
+            raw.push(ch);
+        }
+    }
+
+    // 只有“孤立的单个普通空格”保留；连续空格或含换行/制表符的空白段
+    // 全部删除，不留空格。
+    let mut cleaned = String::new();
+    let mut spaces = 0usize;
+    let mut hard = false;
+    for ch in raw.chars() {
+        if ch == HARD_SPACE {
+            hard = true;
+            continue;
+        }
+        if ch == ' ' {
+            spaces += 1;
+            continue;
+        }
+        if spaces == 1 && !hard {
+            cleaned.push(' ');
+        }
+        spaces = 0;
+        hard = false;
+        cleaned.push(ch);
+    }
+
+    let trimmed = cleaned
+        .trim_matches(|ch| ch == ' ' || ch == '.')
+        .to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut name: String = trimmed.chars().take(80).collect();
+    name = name
+        .trim_end_matches(|ch| ch == ' ' || ch == '.')
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(&name)
+        .to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        name.insert(0, '_');
+    }
+    Some(name)
+}
+
+fn is_invalid_filename_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+    )
+}
+
+/// 配置里的显示名：保留非法符号，只去掉换行/制表符等控制字符和
+/// 非普通空格的空白。
+fn config_display_name(text: &str) -> String {
+    let mut display = String::new();
+    let mut spaces = 0usize;
+    let mut hard = false;
+
+    for ch in text.chars() {
+        if ch.is_control() || (ch.is_whitespace() && ch != ' ') {
+            hard = true;
+            continue;
+        }
+        if ch == ' ' {
+            spaces += 1;
+            continue;
+        }
+        if spaces == 1 && !hard && !display.is_empty() {
+            display.push(' ');
+        }
+        spaces = 0;
+        hard = false;
+        display.push(ch);
+    }
+
+    display.trim().to_string()
+}
+
+fn contains_invalid_filename_char(text: &str) -> bool {
+    text.chars().any(is_invalid_filename_char)
+}
+
+fn unique_directory(directory: &Path, name: &str) -> PathBuf {
+    let candidate = directory.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    for index in 2..1000 {
+        let candidate = directory.join(format!("{name} ({index})"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!("{name} ({})", crate::time::now_ms()))
+}
+
+#[tauri::command]
+pub async fn browser_save_image(
+    app: AppHandle,
+    url: String,
+    referer: Option<String>,
+    user_agent: Option<String>,
+) -> Result<String, String> {
+    let result = save_image_url(&app, &url, referer.as_deref(), user_agent.as_deref()).await;
+    match &result {
+        Ok(path) => {
+            let _ = app.emit(
+                "browser-image-saved",
+                ImageSavedEvent {
+                    ok: true,
+                    path: Some(path.to_string_lossy().into_owned()),
+                    error: None,
+                },
+            );
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "browser-image-saved",
+                ImageSavedEvent {
+                    ok: false,
+                    path: None,
+                    error: Some(format!("{error:#}")),
+                },
+            );
+        }
+    }
+
+    result
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(to_message)
+}
+
+/// 供浏览器 on_navigation 的图片保存代理调用。
+pub(crate) fn spawn_browser_image_save(
+    app: AppHandle,
+    url: String,
+    referer: Option<String>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let result = save_image_url(&app, &url, referer.as_deref(), None).await;
+        let event = match result {
+            Ok(path) => ImageSavedEvent {
+                ok: true,
+                path: Some(path.to_string_lossy().into_owned()),
+                error: None,
+            },
+            Err(error) => ImageSavedEvent {
+                ok: false,
+                path: None,
+                error: Some(format!("{error:#}")),
+            },
+        };
+        let _ = app.emit("browser-image-saved", event);
+    });
+}
+
+async fn save_image_url(
+    app: &AppHandle,
+    url: &str,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+) -> AnyResult<PathBuf> {
+    let directory = ensure_download_dir(app)?;
+
+    let (bytes, mime) = if url.starts_with("data:") {
+        decode_image_data_url(url)?
+    } else {
+        download_image(url, referer, user_agent).await?
+    };
+
+    if !mime.starts_with("image/") {
+        bail!("远程内容不是图片（Content-Type: {mime}）");
+    }
+    if bytes.is_empty() {
+        bail!("图片内容为空");
+    }
+
+    let name = image_file_name(url, &mime);
+    let path = unique_path(&directory, &name);
+    fs::write(&path, bytes)
+        .with_context(|| format!("写入图片失败：{}", path.display()))?;
+    Ok(path)
+}
+
+async fn download_image(
+    url: &str,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+) -> AnyResult<(Vec<u8>, String)> {
+    let parsed = tauri::Url::parse(url).context("图片地址无效")?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        bail!("只支持 http/https 图片地址");
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .user_agent(
+            user_agent
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Mozilla/5.0 KanFanOS"),
+        )
+        .build()?;
+
+    // 很多图床默认按 no-referrer 返回图片；带站点 Referer 反而会被防盗链
+    // 返回 403（yuc.wiki 的 B 站图床就是这种情况）。先不带 Referer，
+    // 遇到 403 再尝试带 Referer，兼容确实需要来源页的站点。
+    let mut response = request_image(&client, parsed.clone(), None).await?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN
+        && let Some(referer) = referer.filter(|value| !value.trim().is_empty())
+    {
+        response = request_image(&client, parsed, Some(referer)).await?;
+    }
+
+    if !response.status().is_success() {
+        bail!("下载图片失败：HTTP {}", response.status());
+    }
+
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let bytes = response.bytes().await.context("读取图片内容失败")?;
+    if bytes.len() > 50 * 1024 * 1024 {
+        bail!("图片超过 50 MiB，已取消保存");
+    }
+    Ok((bytes.to_vec(), mime))
+}
+
+async fn request_image(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    referer: Option<&str>,
+) -> AnyResult<reqwest::Response> {
+    let mut request = client.get(url);
+    if let Some(referer) = referer.filter(|value| !value.trim().is_empty()) {
+        request = request.header(reqwest::header::REFERER, referer);
+    }
+    request.send().await.context("下载图片失败")
+}
+
+fn decode_image_data_url(url: &str) -> AnyResult<(Vec<u8>, String)> {
+    let rest = url.strip_prefix("data:").context("图片 data URL 无效")?;
+    let (meta, data) = rest.split_once(',').context("图片 data URL 无效")?;
+    let mime = meta
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !mime.starts_with("image/") {
+        bail!("data URL 不是图片");
+    }
+
+    let bytes = if meta
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        BASE64.decode(data).context("图片 base64 解码失败")?
+    } else {
+        data.as_bytes().to_vec()
+    };
+    Ok((bytes, mime))
+}
+
+fn image_download_dir(state: &AppState) -> AnyResult<PathBuf> {
+    let settings = settings::load(&state.data_root)?;
+    if let Some(path) = settings
+        .qbittorrent
+        .save_path
+        .filter(|path| !path.trim().is_empty())
+    {
+        return Ok(PathBuf::from(path));
+    }
+
+    Ok(state
+        .data_root
+        .join("qbittorrent")
+        .join("qBittorrent")
+        .join("downloads"))
+}
+
+/// 下载目录必须是已经存在的目录；不存在时只通知前端，不自动重建。
+fn ensure_download_dir(app: &AppHandle) -> AnyResult<PathBuf> {
+    let state = app.state::<AppState>();
+    let directory = image_download_dir(state.inner())?;
+    if !directory.is_dir() {
+        let _ = app.emit(
+            "download-dir-missing",
+            DownloadDirMissingEvent {
+                path: directory.to_string_lossy().into_owned(),
+            },
+        );
+        bail!("选中的下载目录不存在：{}", directory.display());
+    }
+    Ok(directory)
+}
+
+fn image_file_name(url: &str, mime: &str) -> String {
+    let raw = tauri::Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back())
+                .map(|segment| segment.to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("image-{}", crate::time::now_ms()));
+
+    let mut name: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    name = name.trim_matches(|ch| ch == ' ' || ch == '.').to_string();
+    if name.is_empty() {
+        name = format!("image-{}", crate::time::now_ms());
+    }
+
+    if Path::new(&name).extension().is_none() {
+        let extension = match mime {
+            "image/jpeg" => "jpg",
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/avif" => "avif",
+            "image/svg+xml" => "svg",
+            "image/bmp" => "bmp",
+            "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+            _ => "img",
+        };
+        name.push('.');
+        name.push_str(extension);
+    }
+
+    if name.len() > 120 {
+        let extension = Path::new(&name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("img")
+            .to_string();
+        let stem_len = 120usize.saturating_sub(extension.len() + 1);
+        let stem: String = name.chars().take(stem_len).collect();
+        name = format!("{stem}.{extension}");
+    }
+    name
+}
+
+fn unique_path(directory: &Path, name: &str) -> PathBuf {
+    let candidate = directory.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("image");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("img");
+
+    for index in 1..1000 {
+        let candidate = directory.join(format!("{stem}-{index}.{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!("{stem}-{}.{}", crate::time::now_ms(), extension))
 }
 
 /// 浏览器里添加种子后通过事件通知前端。
@@ -109,6 +618,35 @@ pub async fn browser_navigate_tab(
 }
 
 #[tauri::command]
+pub async fn browser_go_back(app: AppHandle, tab_id: u64) -> Result<(), String> {
+    blocking_browser(move || browser::go_back(&app, tab_id)).await
+}
+
+/// 供远程网页 webview 请求打开新标签页。
+#[tauri::command]
+pub fn browser_request_new_tab(app: AppHandle, url: String) -> Result<(), String> {
+    browser::request_new_tab(&app, &url).map_err(to_message)
+}
+
+#[tauri::command]
+pub async fn browser_reload_tab(app: AppHandle, tab_id: u64) -> Result<(), String> {
+    blocking_browser(move || browser::reload_tab(&app, tab_id)).await
+}
+
+#[tauri::command]
+pub async fn browser_get_zoom() -> Result<u32, String> {
+    Ok(browser::zoom_percent())
+}
+
+#[tauri::command]
+pub async fn browser_set_zoom(
+    app: AppHandle,
+    percent: u32,
+) -> Result<u32, String> {
+    blocking_browser_task(move || browser::set_zoom(&app, percent)).await
+}
+
+#[tauri::command]
 pub async fn browser_close_tab(app: AppHandle, tab_id: u64) -> Result<(), String> {
     blocking_browser(move || browser::close_tab(&app, tab_id)).await
 }
@@ -144,6 +682,7 @@ pub fn get_qbittorrent_config(
         username: config.username,
         password: config.password,
         save_path: config.save_path,
+        advanced: config.advanced,
     })
 }
 
@@ -160,12 +699,14 @@ pub fn set_qbittorrent_config(
     let mut app_settings = settings::load(&state.data_root).map_err(to_message)?;
     // 下载目录由单独的命令维护，这里不要覆盖。
     let save_path = app_settings.qbittorrent.save_path.take();
+    let advanced = app_settings.qbittorrent.advanced;
     app_settings.qbittorrent = QbittorrentSettings {
         mode,
         url: url.trim().to_string(),
         username: username.trim().to_string(),
         password,
         save_path,
+        advanced,
     };
     settings::save(&state.data_root, &app_settings).map_err(to_message)?;
 
@@ -178,6 +719,27 @@ pub fn set_qbittorrent_config(
     }
 
     Ok(())
+}
+
+/// 资源页是否显示 qBittorrent 高级连接设置。
+#[tauri::command]
+pub fn set_qbittorrent_advanced(
+    state: State<'_, AppState>,
+    advanced: bool,
+) -> Result<QbittorrentConfig, String> {
+    let mut app_settings = settings::load(&state.data_root).map_err(to_message)?;
+    app_settings.qbittorrent.advanced = advanced;
+    settings::save(&state.data_root, &app_settings).map_err(to_message)?;
+
+    let config = app_settings.qbittorrent;
+    Ok(QbittorrentConfig {
+        mode: config.mode,
+        url: config.url,
+        username: config.username,
+        password: config.password,
+        save_path: config.save_path,
+        advanced: config.advanced,
+    })
 }
 
 #[tauri::command]
@@ -257,12 +819,16 @@ pub async fn qbittorrent_test(
 /// 启动或停止当前下载目录里的一个任务。
 #[tauri::command]
 pub async fn qbittorrent_set_torrent_running(
+    app: AppHandle,
     state: State<'_, AppState>,
     qb_state: State<'_, QbState>,
     manager: State<'_, ManagedQbittorrent>,
     hash: String,
     running: bool,
 ) -> Result<(), String> {
+    if running {
+        ensure_download_dir(&app).map_err(to_message)?;
+    }
     let config = load_config(state.inner()).map_err(to_message)?;
     let endpoint = resolve_endpoint(state.inner(), manager.inner(), &config)
         .await
@@ -359,6 +925,7 @@ async fn add_torrent_url(app: &AppHandle, url: &str) -> AnyResult<()> {
     let manager = app.state::<ManagedQbittorrent>();
 
     let config = load_config(state.inner())?;
+    ensure_download_dir(app)?;
     let endpoint = resolve_endpoint(state.inner(), manager.inner(), &config).await?;
 
     qbittorrent::add_url(

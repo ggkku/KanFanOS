@@ -43,6 +43,22 @@ export function browserNavigateTab(
   return invoke<void>("browser_navigate_tab", { tabId, url });
 }
 
+export function browserGoBack(tabId: number): Promise<void> {
+  return invoke<void>("browser_go_back", { tabId });
+}
+
+export function browserReloadTab(tabId: number): Promise<void> {
+  return invoke<void>("browser_reload_tab", { tabId });
+}
+
+export function browserGetZoom(): Promise<number> {
+  return invoke<number>("browser_get_zoom");
+}
+
+export function browserSetZoom(percent: number): Promise<number> {
+  return invoke<number>("browser_set_zoom", { percent });
+}
+
 export function browserCloseTab(tabId: number): Promise<void> {
   return invoke<void>("browser_close_tab", { tabId });
 }
@@ -82,6 +98,7 @@ export interface QbittorrentConfig {
   username: string;
   password: string;
   savePath: string | null;
+  advanced: boolean;
 }
 
 export interface QbittorrentPreferences {
@@ -131,6 +148,14 @@ export function setQbittorrentConfig(
     url,
     username,
     password,
+  });
+}
+
+export function setQbittorrentAdvanced(
+  advanced: boolean,
+): Promise<QbittorrentConfig> {
+  return invoke<QbittorrentConfig>("set_qbittorrent_advanced", {
+    advanced,
   });
 }
 

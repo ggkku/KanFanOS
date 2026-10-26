@@ -15,12 +15,16 @@ mod state;
 mod time;
 mod tools;
 mod watcher;
+mod window;
 
 use anyhow::{Context, Result};
 use state::{AppState, MediaState, ScanState};
 use tauri::Manager;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 const DATA_SUBDIRS: [&str; 4] = ["database", "thumbnails", "logs", "config"];
+static REAPPLYING_WINDOW_MODE: AtomicBool = AtomicBool::new(false);
 
 fn initialize(app: &mut tauri::App) -> Result<()> {
     let data = paths::app_data_root(app.handle())?;
@@ -127,8 +131,52 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
         eprintln!("应用窗口模式失败: {error}");
     }
 
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = crate::window::main_window(app.handle()) {
         let _ = window.show();
+
+        // Win 键 / 切换桌面后 Windows 可能把全屏或装饰状态改回去；
+        // 重新获得焦点时按配置校正一次，避免“窗口模式设置失效”。
+        let focus_handle = app.handle().clone();
+        window.on_window_event(move |event| {
+            if !matches!(event, tauri::WindowEvent::Focused(true)) {
+                return;
+            }
+            if REAPPLYING_WINDOW_MODE.swap(true, Ordering::SeqCst) {
+                return;
+            }
+
+            let handle = focus_handle.clone();
+            std::thread::spawn(move || {
+                let result: Result<()> = (|| {
+                    let state = handle.state::<AppState>();
+                    let settings = settings::load(&state.data_root)?;
+                    let Some(window) = crate::window::main_window(&handle) else {
+                        return Ok(());
+                    };
+                    let desired =
+                        settings.window_mode == settings::WINDOW_MODE_BORDERLESS;
+                    let actual = window.is_fullscreen().unwrap_or(false)
+                        && !window.is_decorated().unwrap_or(true);
+                    if desired != actual {
+                        commands::settings::apply_window_mode(
+                            &handle,
+                            &settings.window_mode,
+                        )
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    }
+                    Ok(())
+                })();
+
+                if let Err(error) = result {
+                    let state = handle.state::<AppState>();
+                    paths::append_log(
+                        &state.data_root,
+                        &format!("恢复窗口模式失败: {error:#}"),
+                    );
+                }
+                REAPPLYING_WINDOW_MODE.store(false, Ordering::SeqCst);
+            });
+        });
     }
 
     Ok(())
@@ -200,10 +248,18 @@ pub fn run() {
             commands::resources::browser_hide_tab,
             commands::resources::browser_set_tab_bounds,
             commands::resources::browser_navigate_tab,
+            commands::resources::browser_go_back,
+            commands::resources::browser_request_new_tab,
+            commands::resources::browser_save_image,
+            commands::resources::browser_create_folder,
+            commands::resources::browser_reload_tab,
+            commands::resources::browser_get_zoom,
+            commands::resources::browser_set_zoom,
             commands::resources::browser_close_tab,
             commands::resources::browser_list_tabs,
             commands::resources::browser_close_untracked,
             commands::resources::get_qbittorrent_config,
+            commands::resources::set_qbittorrent_advanced,
             commands::resources::set_qbittorrent_config,
             commands::resources::get_qbittorrent_preferences,
             commands::resources::set_qbittorrent_save_path,

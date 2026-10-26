@@ -124,6 +124,14 @@ async fn start(data_root: &Path, save_path: Option<&str>) -> Result<Running> {
     if !config_file.exists() {
         write_config(&config_file, port)?;
     }
+    // 内置实例只需要 WebUI，不需要主窗口。qBittorrent 支持最小化启动，
+    // 先让 Qt 从最小化状态创建窗口，再由 hide 线程隐藏，避免启动闪窗。
+    if let Err(error) = ensure_start_minimized(&config_file) {
+        crate::paths::append_log(
+            data_root,
+            &format!("写入 qBittorrent 最小化启动设置失败：{error:#}"),
+        );
+    }
 
     crate::paths::append_log(
         data_root,
@@ -154,7 +162,23 @@ async fn start(data_root: &Path, save_path: Option<&str>) -> Result<Running> {
     let mut child = command
         .spawn()
         .with_context(|| format!("无法启动 qBittorrent：{}", executable.display()))?;
-    let pid = child.id();
+
+    // qBittorrent 是 GUI 程序，没有无界面模式。窗口可能一启动就出现，
+    // 所以从 spawn 开始就高频隐藏，而不是等 WebUI 就绪后再隐藏，
+    // 否则首次启动会看到 qBittorrent 窗口闪一下。
+    let hide_pid = child.id();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(20) {
+            hide_process_windows(hide_pid);
+            let delay = if started.elapsed() < Duration::from_secs(3) {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(100)
+            };
+            std::thread::sleep(delay);
+        }
+    });
 
     if let Err(error) = wait_ready(&mut child, port).await {
         let _ = child.kill();
@@ -175,14 +199,7 @@ async fn start(data_root: &Path, save_path: Option<&str>) -> Result<Running> {
     }
 
     // qBittorrent 是 GUI 程序，没有无界面模式：主窗口出现后隐藏它。
-    // 窗口可能在 WebUI 就绪后才创建，所以过一会儿再补几次。
-    hide_process_windows(pid);
-    std::thread::spawn(move || {
-        for _ in 0..8 {
-            std::thread::sleep(Duration::from_millis(400));
-            hide_process_windows(pid);
-        }
-    });
+    // 隐藏线程已经在 spawn 后立即启动，这里不再重复启动。
 
     Ok(Running { child, port })
 }
@@ -241,11 +258,53 @@ async fn wait_ready(child: &mut Child, port: u16) -> Result<()> {
 }
 
 /// 首次启动时写入托管配置，保证 WebUI 开启、只监听本机。
+/// 保证已有托管配置也带 `StartMinimized=true`，同时保留用户改过的其它项。
+fn ensure_start_minimized(path: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("读取 qBittorrent 配置失败：{}", path.display()))?;
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+
+    let preference_header = lines
+        .iter()
+        .position(|line| line.trim().eq_ignore_ascii_case("[Preferences]"));
+
+    if let Some(index) = preference_header {
+        let section_end = lines[index + 1..]
+            .iter()
+            .position(|line| line.trim_start().starts_with('['))
+            .map(|offset| index + 1 + offset)
+            .unwrap_or(lines.len());
+
+        let existing = (index + 1..section_end).find(|line_index| {
+            lines[*line_index]
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("startminimized=")
+        });
+
+        match existing {
+            Some(line_index) => lines[line_index] = "StartMinimized=true".to_string(),
+            None => lines.insert(index + 1, "StartMinimized=true".to_string()),
+        }
+    } else {
+        lines.push("[Preferences]".to_string());
+        lines.push("StartMinimized=true".to_string());
+    }
+
+    let mut output = lines.join("\n");
+    output.push('\n');
+    std::fs::write(path, output)
+        .with_context(|| format!("写入 qBittorrent 配置失败：{}", path.display()))
+}
+
 fn write_config(path: &Path, port: u16) -> Result<()> {
     let password_hash = password_hash(&random_password());
     let content = format!(
         "[LegalNotice]\n\
          Accepted=true\n\
+         \n\
+         [Preferences]\n\
+         StartMinimized=true\n\
          \n\
          [WebUI]\n\
          Enabled=true\n\

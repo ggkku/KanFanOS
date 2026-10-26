@@ -161,7 +161,7 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 保存选集配置后立即调用 `reclassify_series_videos` 更新数据库，选集页通过现有的 `onChanged` 刷新，不需要重扫。
 - `episode_count` 只统计 `kind='main'`；「其他视频」数量只统计 `kind='extra'`。
 - `剧场版` 特判在 `catalog.rs`：`MOVIE_CATEGORY`、`is_movie_category`、`schedule_sort_key` 返回 `i64::MAX` 保证排在侧栏最上方。扫描器把顶层 `剧场版/` 当分类，子目录按影片处理。
-- settings.json 新增字段都有 serde 默认值，读取和保存时都会规范化（页面动画、选集动画、窗口模式），旧配置不会产生非法值。
+- settings.json 新增字段都有 serde 默认值，读取和保存时都会规范化（页面动画、选集动画、窗口模式、缩略图宽度），旧配置不会产生非法值。当前默认值按用户配置：`autoWatch=false`、页面动画 `slide`、选集动画 `flip`、窗口模式 `borderless`、qBittorrent 内置实例；番剧根目录仍为 `None`，首次安装必须自己选。
 - 开机自启动写在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `KanFanOS` 值，data 为带引号的当前 exe。发布版启动时按 `auto_start` 同步一次，安装路径变化后能自动修正；**调试版只保存配置、不写注册表**，避免把 `target\debug\kanfanos.exe` 注册成启动项。卸载器目前不会主动删除这个 Run 值。
 - 数据目录由 `paths.rs` 选择：默认安装（exe 就在 `%LOCALAPPDATA%\KanFanOS`）用旧布局；**release 构建**安装到其他可写目录（如 `D:\KanFanOS`）时用 `<安装目录>\data`。开发模式（`target\debug`）和 Program Files 这类不可写目录一律回退 `%LOCALAPPDATA%\KanFanOS`。
 - 首次使用 `<安装目录>\data` 时，如果里面有旧数据库就跳过迁移；否则把旧目录的 `database\` 和 `config\` 复制到临时目录再整体改名，缩略图不搬、由媒体队列重新生成。旧目录保留，迁移结果写进数据目录的 `logs\app.log`。迁移失败会回退旧目录，不能把用户挡在门外。
@@ -184,7 +184,13 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - **不要在同步命令里调用 `add_child`**：它内部 `run_on_main_thread` + 同步等待，同步命令会占住主线程，表现为点击后一直卡在“打开中”、子 webview 停在 `about:blank`。浏览器命令必须写成 `async fn`，并用 `tauri::async_runtime::spawn_blocking` 包住，主线程才能执行创建闭包。
 - `add_child` / `set_position` / `set_size` 收的是**逻辑像素**（前端 CSS px 直接传），Tauri 自己乘缩放因子；不要套用 `playback::scaled_rect` 那套物理像素换算。
 - 原生窗口不随 DOM 布局移动：布局、窗口大小、滚动变化时都要重新 `browser_set_tab_bounds`。当前用 `ResizeObserver` + `resize` + 捕获阶段 `scroll`。
-- 网页默认用 90% 缩放（`browser::PAGE_ZOOM`），在创建和每次 `open` / `navigate` 时调用 `Webview::set_zoom`。WebUI 页面同样适用；改缩放比例只改这个常量。
+- 网页默认缩放改成 80%（`browser::PAGE_ZOOM_PERCENT`），工具栏可 10% 增减；`browser_set_zoom` 会应用到所有已创建标签页，创建/显示/导航/刷新时也使用当前值。右键菜单和浏览器内 Toast 用 `window.__kanfanosZoom` 反向缩放，保持 100% 物理大小。
+- 工具栏的后退用 `history.back()`，刷新用 `Webview::reload()`；两者都必须走 `spawn_blocking`，避免阻塞主线程。
+- 子 webview 的 `target=_blank` 在部分页面不会触发 `on_new_window`：初始化脚本捕获点击后先调用 `browser_request_new_tab`，IPC 不可用时退化为导航到 `https://kanfanos.invalid/open?url=...`，由 `on_navigation` 拦截并发 `browser-new-tab`。
+- 右键菜单：主 webview 在 `main.tsx` 用捕获阶段 `contextmenu.preventDefault()`；每个浏览器子 webview 通过 `initialization_script_for_all_frames` 注入同样逻辑，覆盖 iframe。子 webview 右击 `<img>` 时额外显示 Shadow DOM 菜单「图片另存为」。
+- 图片保存命令 `browser_save_image` 用 reqwest（启用 `system-proxy`，跟随 Windows 系统代理）下载，写入 `qbittorrent.save_path`；为空时写到 `<data_root>/qbittorrent/qBittorrent/downloads`。远程 webview 的 IPC 不可用时，菜单退化为 `kanfanos.invalid/save-image` 导航，由 `on_navigation` 拦截并异步保存。
+- 选中文字右键菜单项「以选中文字创建番剧目录及配置文件」走 `browser_create_folder`：`< > : " / \ | ? *` 换成普通空格；换行、制表符、连续空白直接删除不留空格；首尾空格/点去掉，最多 80 字，保留名加 `_` 前缀，重名自动追加 ` (2)`。创建后在文件夹里生成 `kanfanos.toml`：原文含非法符号时把去掉换行后的原文写进 `name`；不含非法符号时 `name` 留空、显示默认文件夹名。成功发 `browser-folder-created`，主界面收到后调用 `setQbittorrentSavePath` 自动把「下载到」切到新目录。IPC 不可用时同样退化为 `kanfanos.invalid/create-folder`。
+- qBittorrent 的「外部 WebUI」模式与 URL/用户名/密码由设置页的「qBittorrent 高级连接设置」总开关控制；资源页卡片只保留内置实例、WebUI 按钮和下载目录。
 - 资源页通过 `AppShell` 的 `wide` 属性跳过 `max-w-6xl`，最大化窗口时左右不再留大片空白；其他页面保持原宽度。资源页自己的高度用 `calc(100vh - 3rem)` 对应 `py-6`。
 - 浏览器区域不锁比例，直接铺满右侧剩余空间；右侧 qBittorrent 面板固定 `w-60`（240px）。
 - 下载路径用 `truncate` + `[direction:rtl] text-left` 省略开头、保留结尾。Windows 路径里的 `\` 是中性字符，被 LTR 字母包围时不会打乱顺序。

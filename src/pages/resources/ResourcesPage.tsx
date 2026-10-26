@@ -4,7 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  AlertTriangle,
   ArrowDown,
+  ArrowLeft,
   ArrowUp,
   Bookmark as BookmarkIcon,
   CheckCircle2,
@@ -14,6 +16,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCw,
   Server,
   Settings2,
   Square,
@@ -27,10 +30,14 @@ import type { Bookmark } from "../../api/bookmarks";
 import {
   browserCloseTab,
   browserCloseUntracked,
+  browserGetZoom,
+  browserGoBack,
   browserHideTab,
   browserNavigateTab,
   browserOpenTab,
+  browserReloadTab,
   browserSetTabBounds,
+  browserSetZoom,
   browserShowTab,
   getQbittorrentConfig,
   qbittorrentListTorrents,
@@ -55,6 +62,29 @@ interface BrowserTab {
   id: number;
   title: string;
   url: string;
+}
+
+interface ImageSavedEvent {
+  ok: boolean;
+  path: string | null;
+  error: string | null;
+}
+
+interface FolderCreatedEvent {
+  ok: boolean;
+  path: string | null;
+  error: string | null;
+}
+
+interface DownloadDirMissingEvent {
+  path: string;
+}
+
+interface ToastItem {
+  id: number;
+  kind: "success" | "warning";
+  text: string;
+  detail?: string;
 }
 
 const QB_MODES = [
@@ -149,6 +179,29 @@ function measure(element: HTMLElement | null): BrowserRect | null {
   return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
 }
 
+/// 返回 Windows 目录的上一级；已经是盘符/UNC 共享根时返回 null。
+function parentDirectory(path: string): string | null {
+  const trimmed = path.trim().replace(/[\\/]+$/, "");
+  if (!trimmed) return null;
+
+  const separator = trimmed.includes("\\") ? "\\" : "/";
+
+  if (trimmed.startsWith("\\\\")) {
+    const parts = trimmed.slice(2).split(separator).filter(Boolean);
+    if (parts.length <= 2) return null;
+    return `\\\\${parts.slice(0, -1).join(separator)}`;
+  }
+
+  const normalized = trimmed.replace(/[\\/]/g, separator);
+  const index = normalized.lastIndexOf(separator);
+  if (index < 0) return null;
+
+  const parent = normalized.slice(0, index);
+  if (!parent) return null;
+  if (/^[A-Za-z]:$/.test(parent)) return `${parent}\\`;
+  return parent;
+}
+
 const iconButton =
   "flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-lg border border-neutral-800 bg-neutral-900 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-40";
 
@@ -172,6 +225,7 @@ export function ResourcesPage() {
   const activeTabIdRef = useRef<number | null>(sessionCache.activeTabId);
   const tabsRef = useRef<BrowserTab[]>(sessionCache.tabs);
   const newTabRef = useRef<(url?: string) => Promise<void>>(async () => {});
+  const lastNewTabRef = useRef<{ url: string; at: number } | null>(null);
 
   const [address, setAddress] = useState(sessionCache.address);
   const [tabs, setTabs] = useState<BrowserTab[]>(sessionCache.tabs);
@@ -183,6 +237,7 @@ export function ResourcesPage() {
   const [browserVisible, setBrowserVisible] = useState(false);
   const [browserBusy, setBrowserBusy] = useState(false);
   const [browserError, setBrowserError] = useState<string | null>(null);
+  const [zoomPercent, setZoomPercent] = useState(80);
 
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
@@ -195,6 +250,7 @@ export function ResourcesPage() {
     username: "admin",
     password: "",
     savePath: null,
+    advanced: false,
   });
   const [qbVersion, setQbVersion] = useState<string | null>(
     sessionCache.qbVersion,
@@ -211,6 +267,79 @@ export function ResourcesPage() {
     ok: boolean;
     text: string;
   } | null>(null);
+  const [toast, setToast] = useState<ToastItem | null>(null);
+  const [leavingToast, setLeavingToast] = useState<ToastItem | null>(null);
+  const toastRef = useRef<ToastItem | null>(null);
+  const toastAutoTimerRef = useRef<number | undefined>(undefined);
+  const toastExitTimerRef = useRef<number | undefined>(undefined);
+  const toastIdRef = useRef(0);
+
+  const beginToastExit = (item: ToastItem) => {
+    if (toastExitTimerRef.current !== undefined) {
+      window.clearTimeout(toastExitTimerRef.current);
+    }
+    setLeavingToast(item);
+    toastExitTimerRef.current = window.setTimeout(() => {
+      setLeavingToast(null);
+      toastExitTimerRef.current = undefined;
+    }, 200);
+  };
+
+  const dismissToast = () => {
+    const current = toastRef.current;
+    if (!current) return;
+    if (toastAutoTimerRef.current !== undefined) {
+      window.clearTimeout(toastAutoTimerRef.current);
+      toastAutoTimerRef.current = undefined;
+    }
+    toastRef.current = null;
+    setToast(null);
+    beginToastExit(current);
+  };
+
+  const showToast = (
+    kind: ToastItem["kind"],
+    text: string,
+    detail?: string,
+  ) => {
+    if (toastAutoTimerRef.current !== undefined) {
+      window.clearTimeout(toastAutoTimerRef.current);
+      toastAutoTimerRef.current = undefined;
+    }
+    const current = toastRef.current;
+    if (current) beginToastExit(current);
+
+    const next: ToastItem = {
+      id: ++toastIdRef.current,
+      kind,
+      text,
+      detail,
+    };
+    toastRef.current = next;
+    setToast(next);
+
+    if (kind === "success") {
+      toastAutoTimerRef.current = window.setTimeout(() => {
+        toastAutoTimerRef.current = undefined;
+        dismissToast();
+      }, 3200);
+    }
+  };
+
+  const showSuccessToast = (text: string) => showToast("success", text);
+  const showDirWarning = (path: string) =>
+    showToast("warning", "选中的下载目录不存在", path);
+
+  useEffect(() => {
+    return () => {
+      if (toastAutoTimerRef.current !== undefined) {
+        window.clearTimeout(toastAutoTimerRef.current);
+      }
+      if (toastExitTimerRef.current !== undefined) {
+        window.clearTimeout(toastExitTimerRef.current);
+      }
+    };
+  }, []);
 
   const hasTabs = tabs.length > 0;
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
@@ -338,6 +467,9 @@ export function ResourcesPage() {
     let disposed = false;
     let unlistenUpdate: UnlistenFn | undefined;
     let unlistenNew: UnlistenFn | undefined;
+    let unlistenImage: UnlistenFn | undefined;
+    let unlistenFolder: UnlistenFn | undefined;
+    let unlistenMissingDir: UnlistenFn | undefined;
 
     void listen<BrowserTabUpdate>("browser-tab-updated", (event) => {
       const { tabId, title, url } = event.payload;
@@ -367,16 +499,60 @@ export function ResourcesPage() {
     });
 
     void listen<BrowserNewTab>("browser-new-tab", (event) => {
-      void newTabRef.current(event.payload.url);
+      const url = event.payload.url;
+      const now = Date.now();
+      // 原生 on_new_window 和网页点击兜底可能同时到达，短时间内同一
+      // 地址只开一个标签页。
+      if (
+        lastNewTabRef.current?.url === url &&
+        now - lastNewTabRef.current.at < 800
+      ) {
+        return;
+      }
+      lastNewTabRef.current = { url, at: now };
+      void newTabRef.current(url);
     }).then((fn) => {
       if (disposed) fn();
       else unlistenNew = fn;
+    });
+
+    void listen<ImageSavedEvent>("browser-image-saved", (event) => {
+      if (event.payload.ok) {
+        showSuccessToast("图片已保存到「下载到」目录");
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenImage = fn;
+    });
+
+    void listen<FolderCreatedEvent>("browser-folder-created", (event) => {
+      const { ok, path } = event.payload;
+      if (ok) {
+        showSuccessToast("番剧目录及配置文件已创建");
+      }
+      if (ok && path) {
+        // 新建番剧目录后把 qBittorrent 的「下载到」切到该目录。
+        void changeSavePath(path);
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenFolder = fn;
+    });
+
+    void listen<DownloadDirMissingEvent>("download-dir-missing", (event) => {
+      showDirWarning(event.payload.path);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenMissingDir = fn;
     });
 
     return () => {
       disposed = true;
       unlistenUpdate?.();
       unlistenNew?.();
+      unlistenImage?.();
+      unlistenFolder?.();
+      unlistenMissingDir?.();
     };
   }, []);
 
@@ -399,6 +575,20 @@ export function ResourcesPage() {
     const timer = window.setTimeout(() => setBookmarkHint(null), 2500);
     return () => window.clearTimeout(timer);
   }, [bookmarkHint]);
+
+  useEffect(() => {
+    let disposed = false;
+    void browserGetZoom()
+      .then((value) => {
+        if (!disposed) setZoomPercent(value);
+      })
+      .catch(() => {
+        // 读取失败时沿用默认 80%。
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -515,6 +705,9 @@ export function ResourcesPage() {
 
     void listen<TorrentAddedEvent>("qbittorrent-torrent", (event) => {
       const { ok, kind, error } = event.payload;
+      // 目录不存在已经由 download-dir-missing 事件用右下角红色 Toast 提示，
+      // 不再在右侧卡片重复显示红色文字。
+      if (!ok && error?.includes("选中的下载目录不存在")) return;
       setMagnetNotice({
         ok,
         text: ok
@@ -551,11 +744,13 @@ export function ResourcesPage() {
     setBrowserBusy(true);
     setBrowserError(null);
     try {
-      if (activeTabId != null) {
-        await browserHideTab(activeTabId).catch(() => {});
-      }
-
+      const previous = activeTabId;
       const id = await browserOpenTab(target, rect);
+
+      // 新 webview 建好之后再隐藏旧标签：创建失败时原来的页面不会消失。
+      if (previous != null && previous !== id) {
+        await browserHideTab(previous).catch(() => {});
+      }
 
       // 创建过程中用户已经离开资源页：创建完成后立即隐藏。
       if (!mountedRef.current) {
@@ -631,6 +826,30 @@ export function ResourcesPage() {
     } else {
       setBrowserVisible(false);
       setAddress("");
+    }
+  };
+
+  const goBack = () => {
+    if (activeTabId == null) return;
+    void browserGoBack(activeTabId).catch((error) =>
+      setBrowserError(errorMessage(error)),
+    );
+  };
+
+  const reloadTab = () => {
+    if (activeTabId == null) return;
+    void browserReloadTab(activeTabId).catch((error) =>
+      setBrowserError(errorMessage(error)),
+    );
+  };
+
+  const applyZoom = async (percent: number) => {
+    const next = Math.max(30, Math.min(150, Math.round(percent)));
+    try {
+      const applied = await browserSetZoom(next);
+      setZoomPercent(applied);
+    } catch (error) {
+      setBrowserError(errorMessage(error));
     }
   };
 
@@ -742,7 +961,10 @@ export function ResourcesPage() {
       window.setTimeout(() => void pollTorrents(), 600);
     } catch (error) {
       optimisticStatesRef.current.delete(torrent.hash);
-      setMagnetNotice({ ok: false, text: errorMessage(error) });
+      const text = errorMessage(error);
+      if (!text.includes("选中的下载目录不存在")) {
+        setMagnetNotice({ ok: false, text });
+      }
       void pollTorrents();
     } finally {
       setPendingHashes((prev) => {
@@ -750,6 +972,27 @@ export function ResourcesPage() {
         next.delete(torrent.hash);
         return next;
       });
+    }
+  };
+
+  const changeSavePath = async (selected: string) => {
+    // 换目录时立即清空旧列表，暂停轮询并作废在途请求，
+    // 等新目录读取完成后由 pollTorrents 填充。
+    pathChangingRef.current = true;
+    listingEpochRef.current += 1;
+    setQbTorrents([]);
+
+    try {
+      const preferences = await setQbittorrentSavePath(selected);
+      savePathRef.current = preferences.savePath;
+      setSavePath(preferences.savePath);
+      // 用户改好了下载目录，旧的目录不存在警告自动收起。
+      if (toastRef.current?.kind === "warning") dismissToast();
+      pathChangingRef.current = false;
+      void pollTorrents();
+    } catch (error) {
+      pathChangingRef.current = false;
+      setQbError(errorMessage(error));
     }
   };
 
@@ -761,22 +1004,15 @@ export function ResourcesPage() {
         title: "选择 qBittorrent 下载目录",
       });
       if (typeof selected !== "string") return;
-
-      // 换目录时立即清空旧列表，暂停轮询并作废在途请求，
-      // 等新目录读取完成后由 pollTorrents 填充。
-      pathChangingRef.current = true;
-      listingEpochRef.current += 1;
-      setQbTorrents([]);
-
-      const preferences = await setQbittorrentSavePath(selected);
-      savePathRef.current = preferences.savePath;
-      setSavePath(preferences.savePath);
-      pathChangingRef.current = false;
-      void pollTorrents();
+      await changeSavePath(selected);
     } catch (error) {
-      pathChangingRef.current = false;
       setQbError(errorMessage(error));
     }
+  };
+
+  const goUpSavePath = () => {
+    const parent = parentDirectory(savePath);
+    if (parent) void changeSavePath(parent);
   };
 
   // 在内嵌浏览器的新标签页里打开 qBittorrent 自带的 WebUI。
@@ -791,6 +1027,53 @@ export function ResourcesPage() {
     }
   };
 
+  const renderToast = (item: ToastItem, leaving: boolean) => {
+    const success = item.kind === "success";
+    return (
+      <div
+        key={item.id}
+        className={`${leaving ? "kf-toast-out" : "kf-toast"} relative rounded-lg border px-3 py-2 text-[11px] leading-relaxed shadow-xl ${
+          success
+            ? "border-emerald-700/70 bg-emerald-950/95 text-emerald-200"
+            : "border-rose-800/70 bg-rose-950/95 pr-7 text-rose-200"
+        }`}
+      >
+        <div className="flex items-start gap-2">
+          {success ? (
+            <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-400" />
+          ) : (
+            <AlertTriangle size={13} className="mt-0.5 shrink-0 text-rose-400" />
+          )}
+          <div className="min-w-0">
+            <p className={success ? "break-words" : "font-medium text-rose-100"}>
+              {item.text}
+            </p>
+            {item.detail && (
+              <p className="mt-1 break-all font-mono text-[10px] text-rose-300/90">
+                {item.detail}
+              </p>
+            )}
+            {!success && (
+              <p className="mt-1 text-[10px] text-rose-300/80">
+                请重新选择「下载到」目录后再试。
+              </p>
+            )}
+          </div>
+        </div>
+        {!success && (
+          <button
+            type="button"
+            onClick={dismissToast}
+            aria-label="关闭提示"
+            className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded text-rose-400 transition-colors hover:bg-rose-900/60 hover:text-rose-200"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="flex h-[calc(100vh-3rem)] min-h-0 flex-col gap-4">
       <header className="flex shrink-0 items-start justify-between gap-4">
@@ -801,6 +1084,27 @@ export function ResourcesPage() {
         onSubmit={submitAddress}
         className="relative flex shrink-0 items-center gap-2"
       >
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={goBack}
+            disabled={!hasTabs}
+            title="后退"
+            className={iconButton}
+          >
+            <ArrowLeft size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={reloadTab}
+            disabled={!hasTabs}
+            title="刷新"
+            className={iconButton}
+          >
+            <RotateCw size={14} />
+          </button>
+        </div>
+
         <div className="relative min-w-0 flex-1">
           <Globe
             size={14}
@@ -827,6 +1131,28 @@ export function ResourcesPage() {
           )}
           {hasTabs ? "前往" : "打开"}
         </button>
+
+        <div className="flex shrink-0 items-center gap-1 rounded-lg border border-neutral-800 bg-neutral-900 px-1">
+          <button
+            type="button"
+            onClick={() => void applyZoom(zoomPercent - 10)}
+            title="缩小网页"
+            className="flex h-7 w-7 items-center justify-center rounded text-sm text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            −
+          </button>
+          <span className="w-10 text-center text-[11px] tabular-nums text-neutral-400">
+            {zoomPercent}%
+          </span>
+          <button
+            type="button"
+            onClick={() => void applyZoom(zoomPercent + 10)}
+            title="放大网页"
+            className="flex h-7 w-7 items-center justify-center rounded text-sm text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            +
+          </button>
+        </div>
 
         <div className="flex shrink-0 items-center gap-1">
           <button
@@ -983,12 +1309,26 @@ export function ResourcesPage() {
           <div
             ref={areaRef}
             data-browser-area
-            className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900"
+            className={`relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden ${
+              hasTabs
+                ? "rounded-xl border border-neutral-800 bg-neutral-900"
+                : "bg-transparent"
+            }`}
           >
-            {!hasTabs && browserError && (
-              <p className="px-6 text-center text-xs text-rose-400">
-                {browserError}
-              </p>
+            {!hasTabs && (
+              <div className="flex flex-col items-center gap-3">
+                <Globe
+                  size={72}
+                  strokeWidth={1.2}
+                  className="text-neutral-700"
+                  aria-hidden="true"
+                />
+                {browserError && (
+                  <p className="max-w-md px-6 text-center text-xs text-rose-400">
+                    {browserError}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -1017,59 +1357,69 @@ export function ResourcesPage() {
             </div>
           </div>
 
-          <div className="flex shrink-0 rounded-lg border border-neutral-800 bg-neutral-950 p-0.5 text-[11px]">
-            {QB_MODES.map(([mode, label]) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => setQbConfig({ ...qbConfig, mode })}
-                className={`flex-1 rounded-md px-2 py-1 transition-colors ${
-                  qbConfig.mode === mode
-                    ? "bg-neutral-800 text-neutral-100"
-                    : "text-neutral-500 hover:text-neutral-300"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {qbConfig.mode === "external" && (
-            <div className="flex flex-col gap-2">
-              <label className="flex flex-col gap-1 text-[11px] text-neutral-500">
-                WebUI 地址
-                <input
-                  value={qbConfig.url}
-                  onChange={(event) =>
-                    setQbConfig({ ...qbConfig, url: event.target.value })
-                  }
-                  className="rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 text-xs text-neutral-200 focus:border-indigo-500/60 focus:outline-none"
-                />
-              </label>
-              <div className="flex gap-2">
-                <label className="flex min-w-0 flex-1 flex-col gap-1 text-[11px] text-neutral-500">
-                  用户名
-                  <input
-                    value={qbConfig.username}
-                    onChange={(event) =>
-                      setQbConfig({ ...qbConfig, username: event.target.value })
-                    }
-                    className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 text-xs text-neutral-200 focus:border-indigo-500/60 focus:outline-none"
-                  />
-                </label>
-                <label className="flex min-w-0 flex-1 flex-col gap-1 text-[11px] text-neutral-500">
-                  密码
-                  <input
-                    type="password"
-                    value={qbConfig.password}
-                    onChange={(event) =>
-                      setQbConfig({ ...qbConfig, password: event.target.value })
-                    }
-                    className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 text-xs text-neutral-200 focus:border-indigo-500/60 focus:outline-none"
-                  />
-                </label>
+          {qbConfig.advanced && (
+            <>
+              <div className="flex shrink-0 rounded-lg border border-neutral-800 bg-neutral-950 p-0.5 text-[11px]">
+                {QB_MODES.map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setQbConfig({ ...qbConfig, mode })}
+                    className={`flex-1 rounded-md px-2 py-1 transition-colors ${
+                      qbConfig.mode === mode
+                        ? "bg-neutral-800 text-neutral-100"
+                        : "text-neutral-500 hover:text-neutral-300"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
-            </div>
+
+              {qbConfig.mode === "external" && (
+                <div className="flex flex-col gap-2">
+                  <label className="flex flex-col gap-1 text-[11px] text-neutral-500">
+                    WebUI 地址
+                    <input
+                      value={qbConfig.url}
+                      onChange={(event) =>
+                        setQbConfig({ ...qbConfig, url: event.target.value })
+                      }
+                      className="rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 text-xs text-neutral-200 focus:border-indigo-500/60 focus:outline-none"
+                    />
+                  </label>
+                  <div className="flex gap-2">
+                    <label className="flex min-w-0 flex-1 flex-col gap-1 text-[11px] text-neutral-500">
+                      用户名
+                      <input
+                        value={qbConfig.username}
+                        onChange={(event) =>
+                          setQbConfig({
+                            ...qbConfig,
+                            username: event.target.value,
+                          })
+                        }
+                        className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 text-xs text-neutral-200 focus:border-indigo-500/60 focus:outline-none"
+                      />
+                    </label>
+                    <label className="flex min-w-0 flex-1 flex-col gap-1 text-[11px] text-neutral-500">
+                      密码
+                      <input
+                        type="password"
+                        value={qbConfig.password}
+                        onChange={(event) =>
+                          setQbConfig({
+                            ...qbConfig,
+                            password: event.target.value,
+                          })
+                        }
+                        className="w-full rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-1.5 text-xs text-neutral-200 focus:border-indigo-500/60 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           <button
@@ -1108,6 +1458,15 @@ export function ResourcesPage() {
           )}
 
           <div className="flex shrink-0 items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950 px-2.5 py-2 text-[11px]">
+            <button
+              type="button"
+              onClick={goUpSavePath}
+              disabled={!parentDirectory(savePath)}
+              title="返回上级目录"
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-neutral-700 text-neutral-300 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <ArrowUp size={11} />
+            </button>
             <span className="shrink-0 text-neutral-500">下载到</span>
             <span
               className="min-w-0 flex-1 truncate text-left text-neutral-300 [direction:rtl]"
@@ -1221,6 +1580,17 @@ export function ResourcesPage() {
           )}
         </aside>
       </div>
+
+      {(toast || leavingToast) && (
+        <div className="fixed bottom-4 right-3 z-[100] w-56">
+          {leavingToast && (
+            <div className="absolute bottom-0 left-0 w-full">
+              {renderToast(leavingToast, true)}
+            </div>
+          )}
+          {toast && <div className="relative">{renderToast(toast, false)}</div>}
+        </div>
+      )}
 
       {manageOpen && (
         <BookmarksDialog

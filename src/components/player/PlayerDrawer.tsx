@@ -74,6 +74,22 @@ function formatTime(ms: number): string {
 const iconButton =
   "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30";
 
+/** 控制栏收起动画时长；点击画面隐藏后，鼠标在这段时间内不会唤出控制栏。 */
+const CONTROLS_HIDE_DURATION_MS = 300;
+
+/** 自动连播是应用级偏好，不随番剧/集数重置。 */
+const AUTO_PLAY_NEXT_STORAGE_KEY = "kanfanos.player.autoPlayNext";
+
+function readAutoPlayNextPreference(): boolean {
+  try {
+    return window.localStorage.getItem(AUTO_PLAY_NEXT_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+let autoPlayNextPreference = readAutoPlayNextPreference();
+
 /// 把视频区域矩形按视频宽高比居中收缩，得到实际画面窗口。
 /// 这样原生窗口始终与视频同比例，宽高永远一起变化。
 function fitToAspect(
@@ -152,6 +168,20 @@ export function PlayerDrawer({
   // 全屏时控制栏自动隐藏，鼠标移动时重新出现。
   const [controlsVisible, setControlsVisible] = useState(true);
   const [activityTick, setActivityTick] = useState(0);
+  const [autoPlayNext, setAutoPlayNextState] = useState(autoPlayNextPreference);
+
+  const setAutoPlayNext = (enabled: boolean) => {
+    autoPlayNextPreference = enabled;
+    try {
+      window.localStorage.setItem(
+        AUTO_PLAY_NEXT_STORAGE_KEY,
+        enabled ? "1" : "0",
+      );
+    } catch {
+      // localStorage 不可用时只保留本次运行内的全局值。
+    }
+    setAutoPlayNextState(enabled);
+  };
 
   const videoRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
@@ -161,8 +191,14 @@ export function PlayerDrawer({
   const flipFrameRef = useRef<number | null>(null);
   const lastFullscreenRef = useRef(fullscreen);
   const subtitleDelayRef = useRef(0);
+  // 点击画面收起控制栏后的鼠标冷却截止时间。
+  const controlsCooldownUntilRef = useRef(0);
+  // 防止同一集的 ended 状态重复触发自动下一集。
+  const autoAdvancedRef = useRef(false);
 
   const hideControls = useCallback(() => {
+    controlsCooldownUntilRef.current =
+      performance.now() + CONTROLS_HIDE_DURATION_MS;
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
     setControlsVisible(false);
@@ -304,11 +340,13 @@ export function PlayerDrawer({
     let unlisten: UnlistenFn | undefined;
 
     onPlayerMouseActivity(() => {
-      if (!disposed) {
-        setActivityTick((tick) => tick + 1);
-        // 只有鼠标移动才主动唤出控制栏；空格播放/暂停不应唤出。
-        setControlsVisible(true);
-      }
+      if (disposed) return;
+      // 点击画面收起控制栏后，留出和收起动画相同的冷却时间，
+      // 避免鼠标刚移动就立刻把控制栏弹回来。
+      if (performance.now() < controlsCooldownUntilRef.current) return;
+      setActivityTick((tick) => tick + 1);
+      // 只有鼠标移动才主动唤出控制栏；空格播放/暂停不应唤出。
+      setControlsVisible(true);
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -486,6 +524,26 @@ export function PlayerDrawer({
     currentIndex >= 0 && currentIndex < episodes.length - 1
       ? episodes[currentIndex + 1]
       : null;
+
+  // 换集后重新允许自动连播；旧集的 ended 状态可能还会短暂停留，
+  // 用 episodeId 过滤，避免连续跳过两集。
+  useEffect(() => {
+    autoAdvancedRef.current = false;
+  }, [episode.id]);
+
+  useEffect(() => {
+    if (!ended || !autoPlayNext || !next || autoAdvancedRef.current) return;
+    if (playerState?.episodeId !== episode.id) return;
+    autoAdvancedRef.current = true;
+    onSelectEpisode(next);
+  }, [
+    ended,
+    autoPlayNext,
+    next,
+    episode.id,
+    playerState?.episodeId,
+    onSelectEpisode,
+  ]);
 
   const seekTo = (position: number) => {
     const target = Math.max(0, Math.round(position));
@@ -778,8 +836,21 @@ export function PlayerDrawer({
   // 键盘快捷键
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const tag = (event.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      // 进度条是 range input：点击/拖动后即使还保留焦点，空格也应该
+      // 继续作为播放/暂停快捷键，而不是被输入控件过滤掉。
+      const isSeekInput =
+        target instanceof HTMLInputElement &&
+        target.type === "range" &&
+        target.dataset.playerSeek === "true";
+      if (
+        (tag === "INPUT" && !isSeekInput) ||
+        tag === "SELECT" ||
+        tag === "TEXTAREA"
+      ) {
+        return;
+      }
 
       if (event.key === "Escape" && (subtitleMenuOpen || audioMenuOpen)) {
         event.preventDefault();
@@ -895,9 +966,10 @@ export function PlayerDrawer({
 
         <div
           ref={controlsRef}
-          className={`grid shrink-0 ${
+          className={`grid shrink-0 transition-[grid-template-rows] ease-out ${
             !controlsVisible ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
           }`}
+          style={{ transitionDuration: `${CONTROLS_HIDE_DURATION_MS}ms` }}
         >
           <div
             className={`overflow-hidden ${
@@ -905,9 +977,10 @@ export function PlayerDrawer({
             }`}
           >
             <div
-              className={`border-b border-neutral-800 bg-neutral-900/60 px-4 py-3 ${
+              className={`border-b border-neutral-800 bg-neutral-900/60 px-4 py-3 transition-opacity ease-out ${
                 !controlsVisible ? "opacity-0" : "opacity-100"
               }`}
+              style={{ transitionDuration: `${CONTROLS_HIDE_DURATION_MS}ms` }}
             >
               <div
                 className={`grid ${
@@ -1035,11 +1108,18 @@ export function PlayerDrawer({
                 </span>
                 <input
                   type="range"
+                  data-player-seek="true"
                   min={0}
                   max={Math.max(1, durationMs)}
                   value={Math.min(positionMs, Math.max(1, durationMs))}
                   onChange={(event) => setSeekPreview(Number(event.target.value))}
-                  onPointerUp={commitSeek}
+                  onPointerUp={(event) => {
+                    commitSeek();
+                    // 点击/拖动后把焦点还给播放器，避免空格键在进度条上
+                    // 留下焦点框，也避免焦点继续被 range input 吃掉。
+                    event.currentTarget.blur();
+                  }}
+                  onPointerCancel={(event) => event.currentTarget.blur()}
                   onKeyUp={commitSeek}
                   disabled={!playerState || durationMs <= 0}
                   className="h-1 flex-1 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
@@ -1083,6 +1163,20 @@ export function PlayerDrawer({
                 >
                   <SkipForward size={16} />
                 </button>
+
+                <label
+                  title="当前集播放结束后自动播放下一集；最后一集播放完会停止"
+                  className="ml-1 flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                >
+                  <input
+                    type="checkbox"
+                    checked={autoPlayNext}
+                    onChange={(event) => setAutoPlayNext(event.target.checked)}
+                    className="h-3.5 w-3.5 accent-indigo-500"
+                    aria-label="自动连播"
+                  />
+                  自动连播
+                </label>
 
                 <div className="mx-2 h-5 w-px bg-neutral-800" />
 

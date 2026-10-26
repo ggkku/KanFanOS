@@ -149,7 +149,7 @@ pub fn set_window_mode(
 }
 
 pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = crate::window::main_window(app) else {
         return Ok(());
     };
 
@@ -210,6 +210,11 @@ pub(crate) fn apply_window_mode(app: &AppHandle, mode: &str) -> Result<(), Strin
 
             // 必须在进入全屏前去掉装饰。先全屏再 set_decorations
             // 在最大化状态下会让窗口丢失位置和尺寸（落到屏幕外）。
+            window
+                .set_decorations(false)
+                .map_err(|error| error.to_string())?;
+        } else if window.is_decorated().unwrap_or(false) {
+            // 已经全屏但装饰被系统恢复时，重新去掉边框。
             window
                 .set_decorations(false)
                 .map_err(|error| error.to_string())?;

@@ -42,7 +42,7 @@ windows = { version = "0.62", features = [
 ] }
 toml = "1.1.8"
 # qBittorrent WebUI API；cookie_store 用来保存登录后的 SID。
-reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "charset"] }
+reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "charset", "system-proxy"] }
 # 生成 qBittorrent WebUI 的密码哈希：base64(salt):base64(PBKDF2-HMAC-SHA512)。
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha2 = "0.10"

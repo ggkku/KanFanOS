@@ -52,6 +52,9 @@ pub struct QbittorrentSettings {
     /// 默认下载目录；为空时使用 qBittorrent 自己的默认位置。
     #[serde(default)]
     pub save_path: Option<String>,
+    /// 资源页是否显示外部 WebUI / 连接参数。
+    #[serde(default)]
+    pub advanced: bool,
 }
 
 impl Default for QbittorrentSettings {
@@ -62,6 +65,7 @@ impl Default for QbittorrentSettings {
             username: default_qbittorrent_username(),
             password: String::new(),
             save_path: None,
+            advanced: false,
         }
     }
 }
@@ -95,7 +99,7 @@ pub struct Settings {
 }
 
 fn default_auto_watch() -> bool {
-    true
+    false
 }
 
 fn default_thumbnail_width() -> u32 {
@@ -103,15 +107,15 @@ fn default_thumbnail_width() -> u32 {
 }
 
 fn default_page_transition() -> String {
-    PAGE_TRANSITION_FADE.to_string()
+    PAGE_TRANSITION_SLIDE.to_string()
 }
 
 fn default_series_transition() -> String {
-    SERIES_TRANSITION_RISE.to_string()
+    SERIES_TRANSITION_FLIP.to_string()
 }
 
 fn default_window_mode() -> String {
-    WINDOW_MODE_WINDOWED.to_string()
+    WINDOW_MODE_BORDERLESS.to_string()
 }
 
 fn default_qbittorrent_mode() -> String {
@@ -192,6 +196,9 @@ pub fn load(data_root: &Path) -> Result<Settings> {
         .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
     let mut settings: Settings = serde_json::from_str(&content).unwrap_or_default();
     // 兼容旧配置或手动改坏的值。
+    settings.thumbnail_width = settings
+        .thumbnail_width
+        .clamp(MIN_THUMBNAIL_WIDTH, MAX_THUMBNAIL_WIDTH);
     settings.page_transition = normalize_page_transition(&settings.page_transition);
     settings.series_transition = normalize_series_transition(&settings.series_transition);
     settings.window_mode = normalize_window_mode(&settings.window_mode);
@@ -258,12 +265,12 @@ mod tests {
 
         let settings = load(&dir).unwrap();
         assert_eq!(settings.library_root.as_deref(), Some("X:\\番"));
-        assert!(settings.auto_watch);
+        assert!(!settings.auto_watch);
         assert!(!settings.auto_start);
         assert_eq!(settings.thumbnail_width, 480);
-        assert_eq!(settings.page_transition, PAGE_TRANSITION_FADE);
-        assert_eq!(settings.series_transition, SERIES_TRANSITION_RISE);
-        assert_eq!(settings.window_mode, WINDOW_MODE_WINDOWED);
+        assert_eq!(settings.page_transition, PAGE_TRANSITION_SLIDE);
+        assert_eq!(settings.series_transition, SERIES_TRANSITION_FLIP);
+        assert_eq!(settings.window_mode, WINDOW_MODE_BORDERLESS);
 
         let _ = fs::remove_dir_all(dir);
     }

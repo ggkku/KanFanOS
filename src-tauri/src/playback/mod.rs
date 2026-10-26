@@ -251,9 +251,7 @@ fn stop_session(app: &AppHandle) {
 }
 
 fn scaled_rect(app: &AppHandle, rect: PlayerRect) -> Result<(i32, i32, i32, i32)> {
-    let window = app
-        .get_webview_window("main")
-        .context("找不到主窗口")?;
+    let window = crate::window::main_window(app).context("找不到主窗口")?;
     let scale = window.scale_factor()?;
 
     Ok((
@@ -282,8 +280,7 @@ fn ensure_surface(app: &AppHandle) -> Result<isize> {
 
     app.run_on_main_thread(move || {
         let result = (|| -> Result<isize> {
-            let window = main_app
-                .get_webview_window("main")
+            let window = crate::window::main_window(&main_app)
                 .context("找不到主窗口")?;
             let parent = window.hwnd()?;
             surface::create(parent)

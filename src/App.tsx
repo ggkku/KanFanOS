@@ -1197,15 +1197,6 @@ function App() {
         scrollRef={scrollRef}
         wide={view.kind === "resources"}
       >
-      {progress && <ScanBanner progress={progress} onCancel={() => void handleCancelScan()} />}
-
-      {mediaProgress && (
-        <MediaBanner
-          progress={mediaProgress}
-          onCancel={() => void handleCancelMedia()}
-        />
-      )}
-
       {syncOffline && (
         <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-sm text-amber-300">
           番剧目录当前不可访问，自动同步已暂停。请检查磁盘或网络位置是否已连接。
@@ -1246,6 +1237,27 @@ function App() {
           </div>
         </div>
       </AppShell>
+
+      {(progress || mediaProgress) && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4">
+          {progress && (
+            <div className="pointer-events-auto w-full max-w-2xl">
+              <ScanBanner
+                progress={progress}
+                onCancel={() => void handleCancelScan()}
+              />
+            </div>
+          )}
+          {mediaProgress && (
+            <div className="pointer-events-auto w-full max-w-2xl">
+              <MediaBanner
+                progress={mediaProgress}
+                onCancel={() => void handleCancelMedia()}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {extrasOpen && selectedSeries && (
         <div className="pointer-events-none fixed inset-y-0 left-60 right-0 z-20 overflow-hidden">
