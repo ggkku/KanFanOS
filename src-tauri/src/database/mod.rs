@@ -7,6 +7,7 @@
 pub mod history;
 pub mod libraries;
 mod migrations;
+pub mod rss;
 pub mod series;
 pub mod videos;
 

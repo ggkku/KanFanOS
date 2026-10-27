@@ -79,6 +79,17 @@ pub fn browser_create_folder(app: AppHandle, text: String) -> Result<String, Str
     Ok(path_string)
 }
 
+/// 把浏览器里选中的文字交给主界面，打开预填好的追番弹窗。
+#[tauri::command]
+pub fn browser_add_follow_from_text(app: AppHandle, text: String) -> Result<(), String> {
+    let text: String = text.trim().chars().take(4000).collect();
+    if text.is_empty() {
+        return Err("没有选中文字".to_string());
+    }
+    app.emit("rss-add-follow-from-text", text)
+        .map_err(|error| error.to_string())
+}
+
 /// 供浏览器 on_navigation 的建文件夹代理调用。
 pub(crate) fn spawn_browser_folder_create(app: AppHandle, text: String) {
     tauri::async_runtime::spawn(async move {
@@ -129,7 +140,7 @@ fn create_download_folder(app: &AppHandle, text: &str) -> AnyResult<PathBuf> {
     Ok(path)
 }
 
-fn sanitize_folder_name(text: &str) -> Option<String> {
+pub(crate) fn sanitize_folder_name(text: &str) -> Option<String> {
     const RESERVED: [&str; 22] = [
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
         "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
@@ -446,10 +457,15 @@ fn image_download_dir(state: &AppState) -> AnyResult<PathBuf> {
         .join("downloads"))
 }
 
-/// 下载目录必须是已经存在的目录；不存在时只通知前端，不自动重建。
-fn ensure_download_dir(app: &AppHandle) -> AnyResult<PathBuf> {
+/// 当前「下载到」目录，不检查是否存在。
+pub(crate) fn download_base_dir(app: &AppHandle) -> AnyResult<PathBuf> {
     let state = app.state::<AppState>();
-    let directory = image_download_dir(state.inner())?;
+    image_download_dir(state.inner())
+}
+
+/// 下载目录必须是已经存在的目录；不存在时只通知前端，不自动重建。
+pub(crate) fn ensure_download_dir(app: &AppHandle) -> AnyResult<PathBuf> {
+    let directory = download_base_dir(app)?;
     if !directory.is_dir() {
         let _ = app.emit(
             "download-dir-missing",
@@ -920,19 +936,58 @@ pub fn accept_browser_torrent(app: &AppHandle, url: String, kind: &'static str) 
 }
 
 async fn add_torrent_url(app: &AppHandle, url: &str) -> AnyResult<()> {
+    add_torrent_with_save_path(app, url, None).await
+}
+
+/// 添加种子；RSS 追番用 save_path 指定每部番的子目录。
+pub(crate) async fn add_torrent_with_save_path(
+    app: &AppHandle,
+    url: &str,
+    save_path: Option<&str>,
+) -> AnyResult<()> {
     let state = app.state::<AppState>();
     let qb_state = app.state::<QbState>();
     let manager = app.state::<ManagedQbittorrent>();
 
     let config = load_config(state.inner())?;
-    ensure_download_dir(app)?;
+    // 自定义保存目录不依赖全局「下载到」是否可用。
+    if save_path.is_none() {
+        ensure_download_dir(app)?;
+    }
     let endpoint = resolve_endpoint(state.inner(), manager.inner(), &config).await?;
 
     qbittorrent::add_url(
         qb_state.inner(),
         &endpoint,
         url,
-        config.save_path.as_deref(),
+        save_path.or(config.save_path.as_deref()),
+    )
+    .await
+}
+
+/// 以文件内容添加种子；用于应用先抓取 .torrent、再交给 qBittorrent 的 RSS 流程。
+pub(crate) async fn add_torrent_file_with_save_path(
+    app: &AppHandle,
+    bytes: &[u8],
+    filename: &str,
+    save_path: Option<&str>,
+) -> AnyResult<()> {
+    let state = app.state::<AppState>();
+    let qb_state = app.state::<QbState>();
+    let manager = app.state::<ManagedQbittorrent>();
+
+    let config = load_config(state.inner())?;
+    if save_path.is_none() {
+        ensure_download_dir(app)?;
+    }
+    let endpoint = resolve_endpoint(state.inner(), manager.inner(), &config).await?;
+
+    qbittorrent::add_file(
+        qb_state.inner(),
+        &endpoint,
+        bytes,
+        filename,
+        save_path.or(config.save_path.as_deref()),
     )
     .await
 }
@@ -942,7 +997,7 @@ fn load_config(state: &AppState) -> AnyResult<QbittorrentSettings> {
 }
 
 /// 根据配置解析要连接的 WebUI。内置模式负责启动 sidecar。
-async fn resolve_endpoint(
+pub(crate) async fn resolve_endpoint(
     state: &AppState,
     manager: &ManagedQbittorrent,
     config: &QbittorrentSettings,

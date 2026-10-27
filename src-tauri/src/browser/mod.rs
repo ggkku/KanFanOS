@@ -294,6 +294,7 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
       '<div class="menu" role="menu">' +
       '<button class="item" data-action="copy" type="button">复制文字</button>' +
       '<button class="item" data-action="paste" type="button">粘贴文字</button>' +
+      '<button class="item" data-action="follow" type="button">以当前文字添加追番</button>' +
       '<button class="item" data-action="image" type="button">图片另存为至「下载到」目录</button>' +
       '<button class="item" data-action="folder" type="button">以选中文字创建番剧目录及配置文件</button>' +
       '</div>' +
@@ -306,6 +307,7 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     var folderButton = menu.querySelector('[data-action="folder"]');
     var copyButton = menu.querySelector('[data-action="copy"]');
     var pasteButton = menu.querySelector('[data-action="paste"]');
+    var followButton = menu.querySelector('[data-action="follow"]');
     copyButton.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
@@ -334,6 +336,13 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
       hide();
       if (text) createFolder(text);
     });
+    followButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var text = currentText;
+      hide();
+      if (text) addFollowFromText(text);
+    });
   }
 
   function hide() {
@@ -352,8 +361,10 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     var folderButton = menu.querySelector('[data-action="folder"]');
     var copyButton = menu.querySelector('[data-action="copy"]');
     var pasteButton = menu.querySelector('[data-action="paste"]');
+    var followButton = menu.querySelector('[data-action="follow"]');
     copyButton.style.display = text ? "block" : "none";
     pasteButton.style.display = editable ? "block" : "none";
+    followButton.style.display = text ? "block" : "none";
     imageButton.style.display = url ? "block" : "none";
     folderButton.style.display = text ? "block" : "none";
     if (!url && !text && !editable) {
@@ -570,6 +581,42 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     });
   }
 
+  function proxyAddFollow(text) {
+    try {
+      window.location.href =
+        "https://kanfanos.invalid/add-follow?text=" +
+        encodeURIComponent(String(text).slice(0, 4000));
+    } catch (error) {
+      showToast("添加追番失败：" + error, false);
+    }
+  }
+
+  function addFollowFromText(text) {
+    text = String(text).slice(0, 4000);
+    var internals = window.__TAURI_INTERNALS__;
+    if (!internals || !internals.invoke) {
+      proxyAddFollow(text);
+      return;
+    }
+    var request;
+    try {
+      request = Promise.resolve(
+        internals.invoke("browser_add_follow_from_text", { text: text })
+      );
+    } catch (error) {
+      proxyAddFollow(text);
+      return;
+    }
+    request
+      .then(function () {
+        showToast("已打开追番编辑", true);
+      })
+      .catch(function () {
+        // 远程 webview 可能没有 IPC 权限，退回 on_navigation 代理。
+        proxyAddFollow(text);
+      });
+  }
+
   function proxySave(url) {
     try {
       window.location.href =
@@ -665,6 +712,10 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
 "#,
         )
         .on_navigation(move |url| {
+            if let Some(text) = add_follow_proxy_target(url) {
+                let _ = navigation_handle.emit("rss-add-follow-from-text", text);
+                return false;
+            }
             if let Some(text) = folder_create_proxy_target(url) {
                 crate::commands::resources::spawn_browser_folder_create(
                     navigation_handle.clone(),
@@ -882,6 +933,25 @@ fn new_tab_proxy_target(url: &tauri::Url) -> Option<tauri::Url> {
         return None;
     }
     Some(target)
+}
+
+/// 选中文字添加追番代理：`/add-follow?text=...`。
+fn add_follow_proxy_target(url: &tauri::Url) -> Option<String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some("kanfanos.invalid")
+        || url.path() != "/add-follow"
+    {
+        return None;
+    }
+
+    let (_, value) = url
+        .query_pairs()
+        .find(|(key, _)| key == "text")?;
+    let text = value.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// 选中文字建文件夹代理：`/create-folder?text=...`。

@@ -1,4 +1,4 @@
-import { Clock, Globe, Loader2, Search, Settings, X } from "lucide-react";
+import { Clock, Globe, Loader2, Rss, Search, Settings, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 // 直接使用 tauri icon 生成的大尺寸图标，换图标后无需再手动拷一份。
 import appIcon from "../../../src-tauri/icons/128x128@2x.png";
@@ -91,6 +91,12 @@ export function Sidebar({
           label="最近观看"
           active={view.kind === "recent"}
           onClick={() => onNavigate({ kind: "recent" })}
+        />
+        <NavButton
+          icon={Rss}
+          label="追番"
+          active={view.kind === "rss"}
+          onClick={() => onNavigate({ kind: "rss" })}
         />
         <NavButton
           icon={Globe}

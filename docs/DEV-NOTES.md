@@ -203,7 +203,7 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - qBittorrent 默认走**内置 sidecar**：`qbittorrent/managed.rs` 启动随包分发的 `qbittorrent.exe`，使用 `--profile=<data_root>\qbittorrent`、`--webui-port=<随机空闲端口>`、`--no-splash --confirm-legal-notice`。实例只监听 `127.0.0.1`，退出应用时先 POST `/api/v2/app/shutdown`，5 秒未退出再 kill。
 - qBittorrent 的 WebUI **即使开启 localhost 免登录也必须配置非空密码哈希**才会启动（日志里的“未设置凭据”）。托管配置 `<profile>\qBittorrent\config\qBittorrent.ini` **只在首次启动时写入**，之后保留 qBittorrent 自己的配置，这样用户在 WebUI 里改的代理、限速等设置不会在下次启动时被覆盖。`Password_PBKDF2` 的格式是 `base64(salt):base64(PBKDF2-HMAC-SHA512(password, salt, 100000, 64B))`；`LocalHostAuth=false`，所以内置模式不需要登录（登录接口会返回 204 空响应）。
 - WebUI 端口每次启动随机分配（`--webui-port`），qBittorrent 会把它写回自己的配置；前端通过 `qbittorrent_webui_url` 命令取当前地址，右侧「WebUI」按钮用 `newTab` 在内嵌浏览器里**新开标签页**打开完整界面，不顶掉当前页面。因为 `LocalHostAuth=false`，任何本机进程都能控制这个 WebUI，所以只监听 `127.0.0.1`。
-- 右侧列表只显示**当前下载目录下的任务**：每次轮询先读 `/app/preferences` 的 `save_path`，再用 `/torrents/info` 拉取全部任务，在 Rust 侧只按 `save_path` 过滤（忽略大小写、斜杠和末尾分隔符差异）。不区分状态，已停止、暂停、出错的任务也会显示；也不使用 qBittorrent 的 `filter=active`（它只返回当前有传输速率的任务）。
+- 右侧列表显示**当前下载目录及其子目录下的任务**：每次轮询先读 `/app/preferences` 的 `save_path`，再用 `/torrents/info` 拉取全部任务，在 Rust 侧按 `save_path` 过滤（忽略大小写、斜杠和末尾分隔符差异），子目录任务也会显示。不区分状态，已停止、暂停、出错的任务也会显示；也不使用 qBittorrent 的 `filter=active`（它只返回当前有传输速率的任务）。
 - `qbittorrent_list_torrents` 返回 `{ savePath, torrents }`。用户在界面里换目录时先立即清空列表、暂停轮询并递增一个 epoch，丢弃切换前发出、切换后才返回的旧结果；等新目录的列表读回来再填充。外部（WebUI）改了目录时，轮询发现 `savePath` 变化也会同步「下载到」显示并替换列表。
 - 每条任务的启动/停止走 `/api/v2/torrents/start` 与 `/stop`（form 字段 `hashes`）。停止态（`stoppedDL/stoppedUP/pausedDL/pausedUP/error/missingFiles`）显示「启动」，其余显示「停止」。点击后先乐观更新状态，600ms 再轮询校正；失败用面板顶部的提示条显示，不替换整个任务列表。
 - 右侧种子列表在页面可见时每 2 秒轮询一次；面板上的状态、进度和速度不是事件推送，离开资源页就停止轮询。
@@ -214,6 +214,22 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 会话缓存放在 `QbState`，连接参数或模式变化时 `invalidate`；请求遇到 403 视为 SID 过期，丢弃缓存后重试一次。
 - 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
 - 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
+
+## 1.3.0 RSS 追番
+
+- 数据迁移 `009_rss.sql`：`rss_feeds`、`rss_follows`、`rss_entries`、`rss_matches`。订阅源和追番分开，同一个源可以建多个追番。
+- RSS 由应用自己的 `rss::fetch` 拉取（reqwest，跟随系统代理），支持 RSS 2.0 和 Atom；优先取 `enclosure`/`.torrent`/magnet，其次回退到条目 link。解析使用 `quick-xml`。
+- 匹配在 `rss::score_release`：标题/别名规范化后做包含匹配，再解析 S/E、第 N 话/集、括号或连字符集数，过滤合集，按目标分辨率加分。
+- 刷新时对最近 200 条重新匹配，新添加的追番也能匹配到源里已有条目，而不是只等下一次更新。
+- 自动下载只选每个追番当前最高的一集；已下载集数记录在 `rss_follows.last_episode`，旧 pending 标成 ignored。下载目标默认 `<当前下载到>/<净化后的番剧名>/`；`010_rss_save_path.sql` 给 `rss_follows` 增加 `save_path`，在添加/编辑追番时可以指定绝对目录，指定后直接作为该番下载目录，不再追加番剧名。
+- `.torrent` 链接由应用先用系统代理下载并校验，再通过 qBittorrent `/torrents/add` 的 multipart `torrents` 文件字段上传；qBittorrent 不需要抓链接，代理可以保持关闭。磁力链接没有文件可预取，仍然直接交给 qBittorrent 解析元数据。
+- 保存目录在添加追番时默认填入当前「下载到」目录，也可以手动输入或调用系统目录选择器；已有追番卡片有「编辑」入口。保存目录不再留空、不再自动追加番剧名，修改只影响之后加入的任务，不移动已有文件；当前「下载到」目录不存在时追番页和弹窗都会显示警告。
+- RSS 下载使用严格目录模式：保存目录必须已经存在，`queue_download` 不再 `create_dir_all`。不存在时发 `download-dir-missing` 并让匹配记录失败；`RssFollow` 返回 `save_path_exists`，正在追卡片会持续显示对应目录不存在的警告。
+- `011_rss_preferred_groups.sql` 增加追番的 `preferred_groups`，UI 上叫「限定字幕组」。用户自由填写组名（按顺序，逗号或换行分隔）；自动下载把非限定组直接过滤掉，限定组没有更新时等待，不回退。`012_rss_subtitle_packaging.sql` 增加 `subtitle_packaging`，同样作为自动下载硬过滤条件。最近匹配不过滤，仍显示所有字幕组/封装版本供手动下载。发布标题开头的 `[组名]`/`【组名】` 被识别为字幕组，括号中的「内封/外挂/内嵌」等被识别为封装方式。
+- 添加追番时「自动下载最新一集」默认关闭，用户需要自己打开。追番页的卡片可以点击选中/取消选中；初始默认全选，最近匹配同时按选中追番在数据库侧过滤，未选中时显示空提示。
+- 内嵌浏览器选中文字后右键新增「以当前文字添加追番」：浏览器命令把选中文字发给主窗口，主窗口切到追番页，`rss_parse_release_title` 解析出字幕组、番名候选、集数、分辨率、字幕语言、字幕封装、来源、版本等字段，预填到添加追番弹窗；用户确认/修改后点开始追番。远程子 WebView 的 IPC 可能被权限拒绝，因此命令失败时会自动退回 `https://kanfanos.invalid/add-follow?text=...` 导航代理，由主窗口的 on_navigation 回调发事件。
+- `rss_add_follow` 保存后会立即刷新一次对应源；后台调度器启动 45 秒后首次刷新，之后每 15 分钟一次，应用退出后停止。
+- 手动下载通过 `rss_download_match`；自动下载失败会把匹配标成 failed 并保存错误，在追番页可见。
 
 ## 1.2.2 细节
 

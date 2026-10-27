@@ -6,5 +6,6 @@ pub mod library;
 pub mod media;
 pub mod playback;
 pub mod resources;
+pub mod rss;
 pub mod series;
 pub mod settings;

@@ -8,6 +8,7 @@ mod autostart;
 mod paths;
 mod playback;
 mod qbittorrent;
+mod rss;
 mod scanner;
 mod series_config;
 mod settings;
@@ -192,6 +193,7 @@ pub fn run() {
                 eprintln!("应用初始化失败: {error:#}");
                 return Err(error.to_string().into());
             }
+            commands::rss::spawn_scheduler(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -244,6 +246,20 @@ pub fn run() {
             commands::playback::player_set_audio_device,
             commands::playback::set_player_cursor_visible,
             commands::playback::list_recent,
+            commands::rss::rss_list_feeds,
+            commands::rss::rss_download_root,
+            commands::rss::rss_parse_release_title,
+            commands::rss::rss_list_follows,
+            commands::rss::rss_list_matches,
+            commands::rss::rss_list_entries,
+            commands::rss::rss_add_feed,
+            commands::rss::rss_refresh_feed,
+            commands::rss::rss_refresh_all,
+            commands::rss::rss_delete_feed,
+            commands::rss::rss_add_follow,
+            commands::rss::rss_update_follow,
+            commands::rss::rss_delete_follow,
+            commands::rss::rss_download_match,
             commands::resources::browser_open_tab,
             commands::resources::browser_show_tab,
             commands::resources::browser_hide_tab,
@@ -253,6 +269,7 @@ pub fn run() {
             commands::resources::browser_request_new_tab,
             commands::resources::browser_save_image,
             commands::resources::browser_create_folder,
+            commands::resources::browser_add_follow_from_text,
             commands::resources::browser_reload_tab,
             commands::resources::browser_get_zoom,
             commands::resources::browser_set_zoom,

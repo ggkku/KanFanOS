@@ -235,7 +235,7 @@ fn normalize_path(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// 列出指定下载目录下的全部任务（不区分状态），按添加时间倒序。
+/// 列出指定下载目录及其子目录下的全部任务（不区分状态），按添加时间倒序。
 ///
 /// 只按 `save_path` 过滤；已停止、暂停、出错的任务也会显示。
 /// `save_path` 为空时不做目录过滤（例如偏好设置还没读到时）。
@@ -260,7 +260,12 @@ pub async fn dir_torrents(
     Ok(list
         .into_iter()
         .filter(|torrent| {
-            wanted.is_empty() || normalize_path(&torrent.save_path) == wanted
+            if wanted.is_empty() {
+                return true;
+            }
+            let path = normalize_path(&torrent.save_path);
+            // 当前目录本身以及它下面的番剧子目录都算当前下载范围。
+            path == wanted || path.starts_with(&(wanted.clone() + "\\"))
         })
         .collect())
 }
@@ -433,6 +438,49 @@ async fn post_add_url(
         .context("请求 qBittorrent 添加种子失败")
 }
 
+/// 以文件内容添加种子；RSS 先用系统代理抓取 .torrent，再交给 qBittorrent。
+pub async fn add_file(
+    state: &QbState,
+    endpoint: &Endpoint,
+    bytes: &[u8],
+    filename: &str,
+    save_path: Option<&str>,
+) -> Result<()> {
+    let (base, client) = client_for(state, endpoint).await?;
+    let mut response = post_add_file(&base, &client, bytes, filename, save_path).await?;
+
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        state.invalidate();
+        let (base, client) = client_for(state, endpoint).await?;
+        response = post_add_file(&base, &client, bytes, filename, save_path).await?;
+    }
+
+    ensure_ok(response, "添加种子文件").await
+}
+
+async fn post_add_file(
+    base: &str,
+    client: &Client,
+    bytes: &[u8],
+    filename: &str,
+    save_path: Option<&str>,
+) -> Result<reqwest::Response> {
+    let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(filename.to_string())
+        .mime_str("application/x-bittorrent")?;
+    let mut form = reqwest::multipart::Form::new().part("torrents", part);
+    if let Some(path) = save_path.filter(|path| !path.trim().is_empty()) {
+        form = form.text("savepath", path.to_string());
+    }
+
+    client
+        .post(format!("{base}/api/v2/torrents/add"))
+        .multipart(form)
+        .send()
+        .await
+        .context("请求 qBittorrent 添加种子文件失败")
+}
+
 /// qBittorrent 的写操作返回 200/空 body 或 `Ok.`；`Fails.` 和 4xx 视为失败。
 async fn ensure_ok(response: reqwest::Response, action: &str) -> Result<()> {
     let status = response.status();
@@ -457,7 +505,7 @@ mod tests {
     };
 
     use super::{
-        add_url, dir_torrents, preferences, set_save_path, Endpoint, QbState,
+        add_file, add_url, dir_torrents, preferences, set_save_path, Endpoint, QbState,
     };
 
     /// 读取一个完整的 HTTP 请求（含表单 body），避免提前关闭连接导致 RST。
@@ -600,6 +648,22 @@ mod tests {
             &state,
             &Endpoint::local(base),
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            Some("D:\\Downloads"),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn adds_torrent_file() {
+        let base = spawn_mock(1);
+        let state = QbState::default();
+
+        add_file(
+            &state,
+            &Endpoint::local(base),
+            b"d8:announce14:http://tracker4:infod4:name4:testee",
+            "rss-test.torrent",
             Some("D:\\Downloads"),
         )
         .await

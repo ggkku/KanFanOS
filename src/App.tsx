@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { AppShell } from "./components/layout/AppShell";
 import { MediaBanner } from "./components/media/MediaBanner";
@@ -13,6 +14,7 @@ import { SetupScreen } from "./components/setup/SetupScreen";
 import { CategoryPage } from "./pages/category/CategoryPage";
 import { RecentPage } from "./pages/recent/RecentPage";
 import { ResourcesPage } from "./pages/resources/ResourcesPage";
+import { RssPage } from "./pages/rss/RssPage";
 import { SearchPage } from "./pages/search/SearchPage";
 import { SettingsPage } from "./pages/settings/SettingsPage";
 import {
@@ -73,6 +75,10 @@ function patchSeriesSummary<T extends SeriesSummary>(
 
 function App() {
   const [view, setView] = useState<View>({ kind: "recent" });
+  const [pendingFollowText, setPendingFollowText] = useState<string | null>(
+    null,
+  );
+  const navigateRef = useRef<(next: View) => void>(() => {});
   // 页面切换动画：方向由左侧导航的上下顺序决定。
   const [pageTransition, setPageTransition] = useState<"down" | "up" | "fade">(
     "fade",
@@ -475,17 +481,18 @@ function App() {
     };
   }, [view, settings?.libraryId, refreshKey, recentVersion]);
 
-  // 导航项在侧栏里的顺序：最近观看 → 资源 → 各档期 → 设置。
+  // 导航项在侧栏里的顺序：最近观看 → 追番 → 资源 → 各档期 → 设置。
   const navIndex = (target: View): number | null => {
     if (target.kind === "recent") return 0;
-    if (target.kind === "resources") return 1;
+    if (target.kind === "rss") return 1;
+    if (target.kind === "resources") return 2;
     if (target.kind === "category") {
       const index = categories.findIndex(
         (item) => item.key === target.category,
       );
-      return index >= 0 ? index + 2 : null;
+      return index >= 0 ? index + 3 : null;
     }
-    return categories.length + 2;
+    return categories.length + 3;
   };
 
   // 把当前页面快照固定到主滚动区域的大小，并按离开时的 scrollTop 显示。
@@ -558,6 +565,31 @@ function App() {
     flipOriginRef.current = null;
     setView(next);
   };
+  navigateRef.current = navigate;
+
+  // 浏览器右键「以当前文字添加追番」→ 切到追番页并预填。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen<string>("rss-add-follow-from-text", (event) => {
+      if (disposed) return;
+      const text = String(event.payload ?? "").trim();
+      if (!text) return;
+      setPendingFollowText(text);
+      navigateRef.current({ kind: "rss" });
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // 从选集页返回：使用进入动画的倒放。
   const closeSeries = () => {
@@ -1043,6 +1075,13 @@ function App() {
   } else if (view.kind === "resources") {
     // 资源页不依赖媒体库，未选择番剧目录时也能使用。
     content = <ResourcesPage />;
+  } else if (view.kind === "rss") {
+    content = (
+      <RssPage
+        initialText={pendingFollowText}
+        onInitialTextConsumed={() => setPendingFollowText(null)}
+      />
+    );
   } else if (settings?.libraryRoot == null) {
     content = <SetupScreen onChooseRoot={() => void chooseRoot()} />;
   } else if (query.trim().length > 0) {
