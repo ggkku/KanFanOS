@@ -1,10 +1,11 @@
 import { Clock, Loader2, Play, RefreshCw } from "lucide-react";
 import { EmptyState } from "../../components/common/EmptyState";
 import { thumbnailUrl } from "../../lib/thumbnails";
-import type { RecentItem } from "../../types/library";
+import type { RecentItem, RecentPlaybackHint } from "../../types/library";
 
 interface RecentPageProps {
   items: RecentItem[];
+  hints: Record<number, RecentPlaybackHint>;
   loading: boolean;
   dataRoot: string | null;
   onPlay: (item: RecentItem) => void;
@@ -21,6 +22,7 @@ function formatOpenedAt(value: number): string {
 
 export function RecentPage({
   items,
+  hints,
   loading,
   dataRoot,
   onPlay,
@@ -32,7 +34,7 @@ export function RecentPage({
         <div>
           <h1 className="text-2xl font-semibold">最近观看</h1>
           <p className="mt-1 text-sm text-neutral-400">
-            每部番剧一条记录，点击进入选集页继续观看。
+            看完一集会接着播放下一集；最后一集看完了才会从头重播。
           </p>
         </div>
         <button
@@ -69,6 +71,16 @@ export function RecentPage({
                     ),
                   )
                 : 0;
+            const hint = hints[item.videoId];
+            const actionLabel = item.completed
+              ? hint
+                ? hint.isLast
+                  ? "重新播放"
+                  : "播放下一集"
+                : "继续观看"
+              : item.lastPositionMs > 0
+                ? "继续观看"
+                : "观看";
 
             return (
               <div
@@ -131,11 +143,7 @@ export function RecentPage({
                     className="flex items-center gap-1.5 rounded-lg bg-neutral-800 px-2.5 py-1.5 text-[11px] text-neutral-200 transition-colors hover:bg-indigo-600 hover:text-white"
                   >
                     <Play size={11} fill="currentColor" />
-                    {item.completed
-                      ? "重新观看"
-                      : item.lastPositionMs > 0
-                        ? "继续观看"
-                        : "观看"}
+                    {actionLabel}
                   </button>
                 </div>
               </div>

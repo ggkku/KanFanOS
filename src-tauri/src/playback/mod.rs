@@ -61,6 +61,13 @@ pub struct AudioTrack {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AudioDevice {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlayerState {
     pub episode_id: i64,
     pub position_ms: i64,
@@ -80,6 +87,10 @@ pub struct PlayerState {
     pub audio_tracks: Vec<AudioTrack>,
     /// 当前音轨；`None` 表示 mpv 当前没有音频轨。
     pub audio_id: Option<i64>,
+    /// 系统可用的音频输出设备。
+    pub audio_devices: Vec<AudioDevice>,
+    /// 当前音频输出设备；`auto` 表示跟随系统默认。
+    pub audio_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -330,6 +341,8 @@ fn observe_commands() -> Vec<String> {
         (9, "sub-visibility"),
         (10, "sid"),
         (11, "aid"),
+        (12, "audio-device-list"),
+        (13, "audio-device"),
     ]
     .iter()
     .map(|(id, property)| {
@@ -497,6 +510,8 @@ async fn worker(
         subtitles_visible: true,
         audio_tracks: Vec::new(),
         audio_id: None,
+        audio_devices: Vec::new(),
+        audio_device: None,
     };
 
     let mut last_emit = Instant::now();
@@ -588,6 +603,18 @@ async fn worker(
                 state.audio_id = data.and_then(|item| item.as_i64());
                 immediate = true;
             }
+            Some(12) => {
+                if let Some(devices) = data {
+                    state.audio_devices = parse_audio_devices(devices);
+                    immediate = true;
+                }
+            }
+            Some(13) => {
+                state.audio_device = data
+                    .and_then(|item| item.as_str())
+                    .map(str::to_string);
+                immediate = true;
+            }
             _ => {}
         }
 
@@ -639,6 +666,27 @@ fn parse_subtitle_tracks(data: &serde_json::Value) -> Vec<SubtitleTrack> {
                     .unwrap_or_default()
                     .to_string(),
             })
+        })
+        .collect()
+}
+
+/// 从 mpv 的 `audio-device-list` 响应中解析输出设备。
+fn parse_audio_devices(data: &serde_json::Value) -> Vec<AudioDevice> {
+    let Some(devices) = data.as_array() else {
+        return Vec::new();
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let name = device.get("name")?.as_str()?.to_string();
+            let description = device
+                .get("description")
+                .and_then(|item| item.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&name)
+                .to_string();
+            Some(AudioDevice { name, description })
         })
         .collect()
 }
@@ -709,7 +757,7 @@ fn cleanup(app: &AppHandle, episode_id: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_audio_tracks, parse_subtitle_tracks};
+    use super::{parse_audio_devices, parse_audio_tracks, parse_subtitle_tracks};
 
     #[test]
     fn parses_subtitle_tracks_only() {
@@ -746,6 +794,22 @@ mod tests {
         assert_eq!(tracks[0].lang, "ja");
         assert_eq!(tracks[1].id, 2);
         assert_eq!(tracks[1].title, "English");
+    }
+
+    #[test]
+    fn parses_audio_devices() {
+        let data = serde_json::json!([
+            {"name": "auto", "description": "Autoselect device"},
+            {"name": "wasapi/{speaker}", "description": "扬声器 (Realtek)"},
+            {"name": "wasapi/{headphone}"},
+        ]);
+
+        let devices = parse_audio_devices(&data);
+
+        assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].name, "auto");
+        assert_eq!(devices[1].description, "扬声器 (Realtek)");
+        assert_eq!(devices[2].description, "wasapi/{headphone}");
     }
 
     #[test]

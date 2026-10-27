@@ -314,6 +314,10 @@ export function playerSetAudio(audioId: number): Promise<void> {
   return invoke<void>("player_set_audio", { audioId });
 }
 
+export function playerSetAudioDevice(device: string): Promise<void> {
+  return invoke<void>("player_set_audio_device", { device });
+}
+
 export function setPlayerCursorVisible(visible: boolean): Promise<void> {
   return invoke<void>("set_player_cursor_visible", { visible });
 }

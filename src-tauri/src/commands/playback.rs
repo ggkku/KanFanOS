@@ -158,6 +158,19 @@ pub fn player_set_audio(
     .map_err(to_message)
 }
 
+/// 切换播放器的音频输出设备。
+#[tauri::command]
+pub fn player_set_audio_device(
+    app: AppHandle,
+    device: String,
+) -> Result<(), String> {
+    playback::send(
+        &app,
+        json!({ "command": ["set_property", "audio-device", device] }),
+    )
+    .map_err(to_message)
+}
+
 #[tauri::command]
 pub fn list_recent(
     state: State<'_, AppState>,

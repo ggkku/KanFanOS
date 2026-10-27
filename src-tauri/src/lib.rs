@@ -241,6 +241,7 @@ pub fn run() {
             commands::playback::player_set_subtitle,
             commands::playback::player_set_sub_delay,
             commands::playback::player_set_audio,
+            commands::playback::player_set_audio_device,
             commands::playback::set_player_cursor_visible,
             commands::playback::list_recent,
             commands::resources::browser_open_tab,

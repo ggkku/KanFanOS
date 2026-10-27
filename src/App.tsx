@@ -43,6 +43,7 @@ import type {
   EpisodeSummary,
   MediaProgress,
   RecentItem,
+  RecentPlaybackHint,
   ScanProgress,
   SearchItem,
   SeriesSort,
@@ -126,6 +127,9 @@ function App() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchLoadingMore, setSearchLoadingMore] = useState(false);
   const [recentItems, setRecentItems] = useState<RecentItem[]>([]);
+  const [recentHints, setRecentHints] = useState<
+    Record<number, RecentPlaybackHint>
+  >({});
   const [recentLoading, setRecentLoading] = useState(false);
   const [recentVersion, setRecentVersion] = useState(0);
   const [playerTarget, setPlayerTarget] = useState<{
@@ -411,10 +415,53 @@ function App() {
     const libraryId = settings.libraryId;
     let disposed = false;
     setRecentLoading(true);
+    setRecentHints({});
+
+    const buildHints = async (items: RecentItem[]) => {
+      const seriesIds = [
+        ...new Set(
+          items
+            .map((item) => item.seriesId)
+            .filter((id): id is number => id != null),
+        ),
+      ];
+      const episodeLists = new Map<number, EpisodeSummary[]>();
+
+      await Promise.all(
+        seriesIds.map(async (seriesId) => {
+          try {
+            episodeLists.set(
+              seriesId,
+              sortEpisodes(await listEpisodes(seriesId)),
+            );
+          } catch {
+            // 单部番剧读取失败时保留旧行为，不阻塞其它记录。
+          }
+        }),
+      );
+      if (disposed) return;
+
+      const hints: Record<number, RecentPlaybackHint> = {};
+      for (const item of items) {
+        if (item.seriesId == null) continue;
+        const list = episodeLists.get(item.seriesId);
+        if (!list) continue;
+        const index = list.findIndex((episode) => episode.id === item.videoId);
+        if (index < 0) continue;
+        hints[item.videoId] = {
+          nextVideoId:
+            index < list.length - 1 ? list[index + 1].id : null,
+          isLast: index === list.length - 1,
+        };
+      }
+      setRecentHints(hints);
+    };
 
     listRecent(libraryId, RECENT_LIMIT)
       .then((items) => {
-        if (!disposed) setRecentItems(items);
+        if (disposed) return;
+        setRecentItems(items);
+        void buildHints(items);
       })
       .catch((err: unknown) => {
         if (!disposed) setError(errorMessage(err));
@@ -904,7 +951,21 @@ function App() {
 
     try {
       const series = await getSeries(item.seriesId);
-      await openSeries(series, null, item.videoId);
+      const list = sortEpisodes(await listEpisodes(item.seriesId));
+      const index = list.findIndex((episode) => episode.id === item.videoId);
+
+      let targetVideoId = item.videoId;
+      if (item.completed && index >= 0) {
+        if (index < list.length - 1) {
+          // 看完但还没到最后一集：接着播下一集。
+          targetVideoId = list[index + 1].id;
+        } else if (list.length > 0) {
+          // 最后一集看完：重新从第一集开始。
+          targetVideoId = list[0].id;
+        }
+      }
+
+      await openSeries(series, null, targetVideoId);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -1011,6 +1072,7 @@ function App() {
     content = (
       <RecentPage
         items={recentItems}
+        hints={recentHints}
         loading={recentLoading}
         dataRoot={settings?.dataRoot ?? null}
         onPlay={(item) => void openRecentSeries(item)}

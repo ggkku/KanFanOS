@@ -155,6 +155,12 @@ export interface RecentItem {
   completed: boolean;
 }
 
+/** 最近观看根据主选集列表推导出的下一步。 */
+export interface RecentPlaybackHint {
+  nextVideoId: number | null;
+  isLast: boolean;
+}
+
 export interface PlayerRect {
   x: number;
   y: number;
@@ -174,6 +180,11 @@ export interface AudioTrack {
   lang: string;
 }
 
+export interface AudioDevice {
+  name: string;
+  description: string;
+}
+
 export interface PlayerState {
   episodeId: number;
   positionMs: number;
@@ -188,6 +199,8 @@ export interface PlayerState {
   subtitlesVisible: boolean;
   audioTracks: AudioTrack[];
   audioId: number | null;
+  audioDevices: AudioDevice[];
+  audioDevice: string | null;
 }
 
 export interface PlayerStarted {

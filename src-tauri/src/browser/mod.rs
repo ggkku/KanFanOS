@@ -199,6 +199,8 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     let load_handle = app.clone();
 
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(url))
+        // 允许页面读取剪贴板，供自定义右键菜单的「粘贴文字」使用。
+        .enable_clipboard_access()
         // 右键菜单/Toast 需要按当前网页缩放反向补偿，保持 100% 大小。
         .initialization_script_for_all_frames(&format!(
             "window.__kanfanosZoom = {};",
@@ -253,6 +255,7 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
   var toastTimer = 0;
   var currentUrl = null;
   var currentText = null;
+  var currentEditable = null;
 
   function applyZoomScale() {
     if (!host) return;
@@ -289,6 +292,8 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
       '.toast.error{border-color:#7f1d1d;color:#fca5a5;}' +
       '</style>' +
       '<div class="menu" role="menu">' +
+      '<button class="item" data-action="copy" type="button">复制文字</button>' +
+      '<button class="item" data-action="paste" type="button">粘贴文字</button>' +
       '<button class="item" data-action="image" type="button">图片另存为至「下载到」目录</button>' +
       '<button class="item" data-action="folder" type="button">以选中文字创建番剧目录及配置文件</button>' +
       '</div>' +
@@ -299,6 +304,22 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     toast = root.querySelector(".toast");
     var imageButton = menu.querySelector('[data-action="image"]');
     var folderButton = menu.querySelector('[data-action="folder"]');
+    var copyButton = menu.querySelector('[data-action="copy"]');
+    var pasteButton = menu.querySelector('[data-action="paste"]');
+    copyButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var text = currentText;
+      hide();
+      if (text) copyText(text);
+    });
+    pasteButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var editable = currentEditable;
+      hide();
+      if (editable) pasteText(editable);
+    });
     imageButton.addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
@@ -318,18 +339,24 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
   function hide() {
     currentUrl = null;
     currentText = null;
+    currentEditable = null;
     if (menu) menu.style.display = "none";
   }
 
-  function show(x, y, url, text) {
+  function show(x, y, url, text, editable) {
     ensureUi();
     currentUrl = url;
     currentText = text;
+    currentEditable = editable;
     var imageButton = menu.querySelector('[data-action="image"]');
     var folderButton = menu.querySelector('[data-action="folder"]');
+    var copyButton = menu.querySelector('[data-action="copy"]');
+    var pasteButton = menu.querySelector('[data-action="paste"]');
+    copyButton.style.display = text ? "block" : "none";
+    pasteButton.style.display = editable ? "block" : "none";
     imageButton.style.display = url ? "block" : "none";
     folderButton.style.display = text ? "block" : "none";
-    if (!url && !text) {
+    if (!url && !text && !editable) {
       menu.style.display = "none";
       return;
     }
@@ -374,7 +401,131 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     if (!selection || selection.isCollapsed) return null;
     var text = selection.toString().trim();
     if (!text) return null;
-    return text.slice(0, 300);
+    return text;
+  }
+
+  function editableFor(node) {
+    var element = node.closest(
+      'input, textarea, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]'
+    );
+    if (!element) return null;
+    if (element.tagName === "INPUT") {
+      var type = String(element.type || "text").toLowerCase();
+      if (
+        /^(button|checkbox|color|file|hidden|image|radio|range|reset|submit)$/.test(
+          type
+        )
+      ) {
+        return null;
+      }
+      if (element.disabled || element.readOnly) return null;
+    } else if (element.tagName === "TEXTAREA") {
+      if (element.disabled || element.readOnly) return null;
+    }
+    return element;
+  }
+
+  function fallbackCopyText(text) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.cssText =
+      "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none;";
+    (document.body || document.documentElement).appendChild(area);
+    area.select();
+    area.setSelectionRange(0, area.value.length);
+    var copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (error) {
+      copied = false;
+    }
+    area.remove();
+    return copied;
+  }
+
+  function copyText(text) {
+    var done = function (ok) {
+      showToast(ok ? "已复制文字" : "复制失败", ok);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard
+        .writeText(text)
+        .then(function () {
+          done(true);
+        })
+        .catch(function () {
+          done(fallbackCopyText(text));
+        });
+    } else {
+      done(fallbackCopyText(text));
+    }
+  }
+
+  function insertPlainText(text, element) {
+    var target = element || document.activeElement;
+    if (!target) return false;
+    try {
+      target.focus({ preventScroll: true });
+    } catch (error) {
+      target.focus();
+    }
+
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") {
+      var start =
+        typeof target.selectionStart === "number"
+          ? target.selectionStart
+          : target.value.length;
+      var end =
+        typeof target.selectionEnd === "number"
+          ? target.selectionEnd
+          : start;
+      var next = target.value.slice(0, start) + text + target.value.slice(end);
+      var setter = Object.getOwnPropertyDescriptor(
+        target.constructor.prototype,
+        "value"
+      );
+      if (setter && setter.set) setter.set.call(target, next);
+      else target.value = next;
+      target.selectionStart = target.selectionEnd = start + text.length;
+      try {
+        target.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            inputType: "insertText",
+            data: text
+          })
+        );
+      } catch (error) {
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return true;
+    }
+
+    if (target.isContentEditable) {
+      try {
+        return document.execCommand("insertText", false, text);
+      } catch (error) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  function pasteText(element) {
+    var paste = function (text) {
+      var ok = insertPlainText(text, element);
+      showToast(ok ? "已粘贴文字" : "当前输入框不支持粘贴", ok);
+    };
+    var fail = function () {
+      showToast("无法读取剪贴板，请按 Ctrl+V", false);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(paste).catch(fail);
+    } else {
+      fail();
+    }
   }
 
   function proxyCreateFolder(text) {
@@ -388,6 +539,7 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
   }
 
   function createFolder(text) {
+    text = String(text).slice(0, 300);
     var internals = window.__TAURI_INTERNALS__;
     if (!internals || !internals.invoke) {
       proxyCreateFolder(text);
@@ -477,12 +629,13 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
       var img = node.closest("img");
       var url = img ? imageUrlFor(img) : null;
       var text = selectedText();
-      if (!url && !text) {
+      var editable = editableFor(node);
+      if (!url && !text && !editable) {
         hide();
         return;
       }
       event.stopPropagation();
-      show(event.clientX, event.clientY, url, text);
+      show(event.clientX, event.clientY, url, text, editable);
     },
     true
   );
@@ -490,7 +643,7 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
   document.addEventListener(
     "mousedown",
     function (event) {
-      if (!currentUrl && !currentText) return;
+      if (!currentUrl && !currentText && !currentEditable) return;
       var path = event.composedPath ? event.composedPath() : [];
       if (host && path.indexOf(host) >= 0) return;
       hide();

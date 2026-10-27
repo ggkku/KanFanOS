@@ -86,7 +86,7 @@ pnpm sidecars
 安装包输出：
 
 ```text
-src-tauri/target/release/bundle/nsis/KanFanOS_1.2.1_x64-setup.exe
+src-tauri/target/release/bundle/nsis/KanFanOS_1.2.2_x64-setup.exe
 ```
 
 > 内置 mpv、FFmpeg 和 qBittorrent 后安装包约 200 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
@@ -306,6 +306,13 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 未命中图片的网页右键菜单统一屏蔽；`kanfanos.toml` 新增 `episode_mode` 和 `episodes`，可以手动勾选进入选集的视频，未选中的进入「其他视频」
 - 修复最大化窗口切换全屏 / 窗口模式时窗口落到屏幕外的问题
 - 版本号提升到 1.2.1
+
+**第 20 步：1.2.2 播放器与浏览器细节**
+
+- 浏览器选中文字后右键可复制纯文本，输入框内右键可粘贴纯文本
+- 最近观看看完一集后显示「播放下一集」；只有最后一集看完才显示「重新播放」，点击从第一集开始
+- 播放器控制栏新增音频输出设备选择，可在字幕/音轨菜单的风格内切换 mpv 输出设备
+- 版本号提升到 1.2.2
 
 ## 已知限制
 

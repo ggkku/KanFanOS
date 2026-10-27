@@ -215,6 +215,12 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
 - 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
 
+## 1.2.2 细节
+
+- 浏览器子 webview 开启 `enable_clipboard_access()`；自定义右键菜单对选中的文字提供「复制文字」，对可编辑控件提供「粘贴文字」，均只处理纯文本。复制优先用 `navigator.clipboard.writeText`，失败回退 `execCommand("copy")`；粘贴用 `navigator.clipboard.readText`，读取失败时提示按 Ctrl+V。
+- 最近观看的下一步由前端读取主选集并按 `sortEpisodes` 自然排序推导：已完成且非最后一集显示「播放下一集」，最后一集显示「重新播放」并从第一集打开。
+- 播放器通过 mpv 的 `audio-device-list` / `audio-device` 属性提供输出设备列表和切换，UI 与字幕/音轨的 chip 面板一致；只改变 mpv 播放输出，不修改 Windows 全局默认设备。
+
 ## 图标
 
 - 源图放在项目根目录 `icon.png`（正方形、建议 1024×1024 以上、透明背景）。

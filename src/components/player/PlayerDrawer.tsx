@@ -17,6 +17,7 @@ import {
   Play,
   SkipBack,
   SkipForward,
+  Speaker,
   Volume2,
   VolumeX,
   X,
@@ -30,6 +31,7 @@ import {
   onPlayerState,
   playerSeek,
   playerSetAudio,
+  playerSetAudioDevice,
   playerSetMuted,
   playerSetPaused,
   playerSetSpeed,
@@ -163,6 +165,7 @@ export function PlayerDrawer({
   const [volumePreview, setVolumePreview] = useState<number | null>(null);
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
+  const [audioOutputMenuOpen, setAudioOutputMenuOpen] = useState(false);
   // 字幕整体时间偏移；正数延后、负数提前。每次换集 mpv 都是新进程，重置为 0。
   const [subtitleDelayMs, setSubtitleDelayMs] = useState(0);
   // 全屏时控制栏自动隐藏，鼠标移动时重新出现。
@@ -201,6 +204,7 @@ export function PlayerDrawer({
       performance.now() + CONTROLS_HIDE_DURATION_MS;
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
+    setAudioOutputMenuOpen(false);
     setControlsVisible(false);
   }, []);
   // 控制栏：全屏切换时逐帧跟随视频矩形。
@@ -248,6 +252,7 @@ export function PlayerDrawer({
     setVolumePreview(null);
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
+    setAudioOutputMenuOpen(false);
 
     const timer = window.setTimeout(async () => {
       const element = videoRef.current;
@@ -383,9 +388,10 @@ export function PlayerDrawer({
     if (!fullscreen) return;
 
     const timer = window.setTimeout(() => {
-      if (!subtitleMenuOpen && !audioMenuOpen) {
+      if (!subtitleMenuOpen && !audioMenuOpen && !audioOutputMenuOpen) {
         setSubtitleMenuOpen(false);
         setAudioMenuOpen(false);
+        setAudioOutputMenuOpen(false);
         setControlsVisible(false);
       }
     }, 2500);
@@ -396,6 +402,7 @@ export function PlayerDrawer({
     activityTick,
     subtitleMenuOpen,
     audioMenuOpen,
+    audioOutputMenuOpen,
     controlsVisible,
   ]);
 
@@ -517,6 +524,15 @@ export function PlayerDrawer({
     audioTracks.find((track) => track.id === audioId) ?? null;
   const audioLabel = currentAudio ? audioTrackLabel(currentAudio) : null;
   const hasAudio = audioTracks.length > 0;
+  const audioDevices = playerState?.audioDevices ?? [];
+  const audioDevice = playerState?.audioDevice ?? null;
+  const currentAudioDevice =
+    audioDevices.find((device) => device.name === audioDevice) ?? null;
+  const audioOutputLabel = currentAudioDevice
+    ? currentAudioDevice.description
+    : audioDevice === "auto" || audioDevice == null
+      ? "自动"
+      : audioDevice;
 
   const currentIndex = episodes.findIndex((item) => item.id === episode.id);
   const previous = currentIndex > 0 ? episodes[currentIndex - 1] : null;
@@ -573,17 +589,24 @@ export function PlayerDrawer({
   const closeMenus = () => {
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
+    setAudioOutputMenuOpen(false);
   };
 
   const selectSubtitle = (id: number | null) => {
     // 切换轨道后保留字幕面板，方便继续调时间或换另一条字幕。
     setAudioMenuOpen(false);
+    setAudioOutputMenuOpen(false);
     void playerSetSubtitle(id);
   };
 
   const selectAudio = (id: number) => {
     closeMenus();
     void playerSetAudio(id);
+  };
+
+  const selectAudioDevice = (device: string) => {
+    closeMenus();
+    void playerSetAudioDevice(device);
   };
 
   const adjustSubtitleDelay = (deltaMs: number) => {
@@ -607,6 +630,7 @@ export function PlayerDrawer({
   const toggleSubtitleMenu = () => {
     if (!playerState) return;
     setAudioMenuOpen(false);
+    setAudioOutputMenuOpen(false);
     setSubtitleMenuOpen((open) => !open);
   };
 
@@ -614,7 +638,15 @@ export function PlayerDrawer({
   const toggleAudioMenu = () => {
     if (!playerState || !hasAudio) return;
     setSubtitleMenuOpen(false);
+    setAudioOutputMenuOpen(false);
     setAudioMenuOpen((open) => !open);
+  };
+
+  const toggleAudioOutputMenu = () => {
+    if (!playerState || audioDevices.length === 0) return;
+    setSubtitleMenuOpen(false);
+    setAudioMenuOpen(false);
+    setAudioOutputMenuOpen((open) => !open);
   };
 
   // 播放器回报的位置接近目标后，进度条才恢复跟随实时进度。
@@ -831,7 +863,13 @@ export function PlayerDrawer({
         flipFrameRef.current = null;
       }
     };
-  }, [fullscreen, controlsVisible, subtitleMenuOpen, audioMenuOpen]);
+  }, [
+    fullscreen,
+    controlsVisible,
+    subtitleMenuOpen,
+    audioMenuOpen,
+    audioOutputMenuOpen,
+  ]);
 
   // 键盘快捷键
   useEffect(() => {
@@ -852,7 +890,10 @@ export function PlayerDrawer({
         return;
       }
 
-      if (event.key === "Escape" && (subtitleMenuOpen || audioMenuOpen)) {
+      if (
+        event.key === "Escape" &&
+        (subtitleMenuOpen || audioMenuOpen || audioOutputMenuOpen)
+      ) {
         event.preventDefault();
         closeMenus();
       } else if (event.key === "Escape") {
@@ -868,6 +909,7 @@ export function PlayerDrawer({
         if (fullscreen) {
           setSubtitleMenuOpen(false);
           setAudioMenuOpen(false);
+          setAudioOutputMenuOpen(false);
           setControlsVisible(false);
         }
       } else if (event.key === "ArrowLeft") {
@@ -984,7 +1026,7 @@ export function PlayerDrawer({
             >
               <div
                 className={`grid ${
-                  subtitleMenuOpen || audioMenuOpen
+                  subtitleMenuOpen || audioMenuOpen || audioOutputMenuOpen
                     ? "grid-rows-[1fr]"
                     : "grid-rows-[0fr]"
                 }`}
@@ -1086,6 +1128,40 @@ export function PlayerDrawer({
                             label={audioTrackLabel(track)}
                             selected={track.id === audioId}
                             onClick={() => selectAudio(track.id)}
+                          />
+                        ))
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={closeMenus}
+                        className="ml-auto text-[11px] text-neutral-400 transition-colors hover:text-neutral-200"
+                      >
+                        收起
+                      </button>
+                    </div>
+                  )}
+
+                  {audioOutputMenuOpen && (
+                    <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-neutral-800 pb-3">
+                      <span className="mr-1 text-[10px] uppercase tracking-widest text-neutral-500">
+                        音频输出
+                      </span>
+
+                      {audioDevices.length === 0 ? (
+                        <span className="text-xs text-neutral-500">
+                          没有检测到可用的音频输出设备
+                        </span>
+                      ) : (
+                        audioDevices.map((device) => (
+                          <TrackChip
+                            key={device.name}
+                            label={device.description || device.name}
+                            selected={
+                              device.name === audioDevice ||
+                              (audioDevice == null && device.name === "auto")
+                            }
+                            onClick={() => selectAudioDevice(device.name)}
                           />
                         ))
                       )}
@@ -1241,6 +1317,24 @@ export function PlayerDrawer({
                     }
                   >
                     <AudioLines size={16} />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={toggleAudioOutputMenu}
+                    disabled={!playerState || audioDevices.length === 0}
+                    className={`${iconButton} ${
+                      audioOutputMenuOpen
+                        ? "bg-neutral-800 text-white"
+                        : ""
+                    }`}
+                    title={
+                      audioDevices.length > 0
+                        ? `音频输出（当前：${audioOutputLabel}）`
+                        : "音频输出"
+                    }
+                  >
+                    <Speaker size={16} />
                   </button>
 
                   <button
