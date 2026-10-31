@@ -918,7 +918,18 @@ pub fn accept_browser_torrent(app: &AppHandle, url: String, kind: &'static str) 
     let handle = app.clone();
 
     tauri::async_runtime::spawn(async move {
-        let (ok, error) = match add_torrent_url(&handle, &url).await {
+        let result = if kind == "torrent" {
+            match crate::rss::fetch_torrent(&url).await {
+                Ok(bytes) => {
+                    let filename = format!("browser-{}.torrent", crate::time::now_ms());
+                    add_torrent_file_with_save_path(&handle, &bytes, &filename, None).await
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            add_torrent_url(&handle, &url).await
+        };
+        let (ok, error) = match result {
             Ok(()) => (true, None),
             Err(error) => (false, Some(format!("{error:#}"))),
         };

@@ -242,7 +242,6 @@ export function ResourcesPage() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
-  const [bookmarkHint, setBookmarkHint] = useState<string | null>(null);
 
   const [qbConfig, setQbConfig] = useState<QbittorrentConfig>({
     mode: "sidecar",
@@ -260,13 +259,10 @@ export function ResourcesPage() {
   );
   const [qbBusy, setQbBusy] = useState(false);
   const [qbError, setQbError] = useState<string | null>(null);
+  const qbErrorRef = useRef<string | null>(null);
   const [savePath, setSavePath] = useState(sessionCache.savePath);
   // 正在启动/停止的任务 hash，按钮显示转圈并禁用。
   const [pendingHashes, setPendingHashes] = useState<Set<string>>(new Set());
-  const [magnetNotice, setMagnetNotice] = useState<{
-    ok: boolean;
-    text: string;
-  } | null>(null);
   const [toast, setToast] = useState<ToastItem | null>(null);
   const [leavingToast, setLeavingToast] = useState<ToastItem | null>(null);
   const toastRef = useRef<ToastItem | null>(null);
@@ -327,6 +323,18 @@ export function ResourcesPage() {
   };
 
   const showSuccessToast = (text: string) => showToast("success", text);
+  const reportQbError = (reason: unknown) => {
+    const text = errorMessage(reason);
+    setQbError(text);
+    if (qbErrorRef.current !== text) {
+      qbErrorRef.current = text;
+      showToast("warning", text);
+    }
+  };
+  const clearQbError = () => {
+    qbErrorRef.current = null;
+    setQbError(null);
+  };
   const showDirWarning = (path: string) =>
     showToast("warning", "选中的下载目录不存在", path);
 
@@ -571,12 +579,6 @@ export function ResourcesPage() {
   }, []);
 
   useEffect(() => {
-    if (!bookmarkHint) return;
-    const timer = window.setTimeout(() => setBookmarkHint(null), 2500);
-    return () => window.clearTimeout(timer);
-  }, [bookmarkHint]);
-
-  useEffect(() => {
     let disposed = false;
     void browserGetZoom()
       .then((value) => {
@@ -639,7 +641,7 @@ export function ResourcesPage() {
     const status = await qbittorrentTest();
     setQbVersion(status.version);
     applyListing(await qbittorrentListTorrents());
-    setQbError(null);
+    clearQbError();
   }, [applyListing]);
 
   // 资源页可见时每 2 秒刷新种子进度。连续失败时把按钮切回未连接状态，
@@ -658,7 +660,7 @@ export function ResourcesPage() {
       pollFailuresRef.current += 1;
       if (pollFailuresRef.current >= 3) {
         setQbVersion(null);
-        setQbError(errorMessage(error));
+        reportQbError(error);
       }
     } finally {
       pollingRef.current = false;
@@ -669,13 +671,13 @@ export function ResourcesPage() {
   const autoConnect = useCallback(async () => {
     const alreadyConnected = sessionCache.qbVersion != null;
     if (!alreadyConnected) setQbBusy(true);
-    setQbError(null);
+    clearQbError();
     try {
       await refresh();
     } catch (error) {
       setQbVersion(null);
       setQbTorrents([]);
-      setQbError(errorMessage(error));
+      reportQbError(error);
     } finally {
       if (!alreadyConnected) setQbBusy(false);
     }
@@ -708,17 +710,17 @@ export function ResourcesPage() {
       // 目录不存在已经由 download-dir-missing 事件用右下角红色 Toast 提示，
       // 不再在右侧卡片重复显示红色文字。
       if (!ok && error?.includes("选中的下载目录不存在")) return;
-      setMagnetNotice({
-        ok,
-        text: ok
+      showToast(
+        ok ? "success" : "warning",
+        ok
           ? kind === "magnet"
             ? "已添加磁力链接"
             : "已添加种子链接"
           : `添加失败：${error ?? "未知错误"}`,
-      });
+      );
 
       if (ok) {
-        void refresh().catch((reason) => setQbError(errorMessage(reason)));
+        void refresh().catch((reason) => reportQbError(reason));
       }
     }).then((fn) => {
       if (disposed) fn();
@@ -730,12 +732,6 @@ export function ResourcesPage() {
       unlisten?.();
     };
   }, [refresh]);
-
-  useEffect(() => {
-    if (!magnetNotice) return;
-    const timer = window.setTimeout(() => setMagnetNotice(null), 5000);
-    return () => window.clearTimeout(timer);
-  }, [magnetNotice]);
 
   const newTab = async (target: string = "") => {
     const rect = measure(areaRef.current);
@@ -895,9 +891,9 @@ export function ResourcesPage() {
 
     try {
       setBookmarks(await addBookmark(tab.title, tab.url));
-      setBookmarkHint("已收藏");
+      showSuccessToast("已收藏");
     } catch (error) {
-      setBookmarkHint(errorMessage(error));
+      showToast("warning", errorMessage(error));
     }
   };
 
@@ -910,13 +906,13 @@ export function ResourcesPage() {
     try {
       setBookmarks(await removeBookmark(id));
     } catch (error) {
-      setBookmarkHint(errorMessage(error));
+      showToast("warning", errorMessage(error));
     }
   };
 
   const connect = async () => {
     setQbBusy(true);
-    setQbError(null);
+    clearQbError();
     try {
       await setQbittorrentConfig(
         qbConfig.mode,
@@ -928,7 +924,7 @@ export function ResourcesPage() {
     } catch (error) {
       setQbVersion(null);
       setQbTorrents([]);
-      setQbError(errorMessage(error));
+      reportQbError(error);
     } finally {
       setQbBusy(false);
     }
@@ -963,7 +959,7 @@ export function ResourcesPage() {
       optimisticStatesRef.current.delete(torrent.hash);
       const text = errorMessage(error);
       if (!text.includes("选中的下载目录不存在")) {
-        setMagnetNotice({ ok: false, text });
+        showToast("warning", text);
       }
       void pollTorrents();
     } finally {
@@ -992,7 +988,7 @@ export function ResourcesPage() {
       void pollTorrents();
     } catch (error) {
       pathChangingRef.current = false;
-      setQbError(errorMessage(error));
+      reportQbError(error);
     }
   };
 
@@ -1006,7 +1002,7 @@ export function ResourcesPage() {
       if (typeof selected !== "string") return;
       await changeSavePath(selected);
     } catch (error) {
-      setQbError(errorMessage(error));
+      reportQbError(error);
     }
   };
 
@@ -1023,7 +1019,7 @@ export function ResourcesPage() {
       // 打开 WebUI 的同时同步一次面板状态。
       void refresh().catch(() => {});
     } catch (error) {
-      setQbError(errorMessage(error));
+      reportQbError(error);
     }
   };
 
@@ -1051,11 +1047,6 @@ export function ResourcesPage() {
             {item.detail && (
               <p className="mt-1 break-all font-mono text-[10px] text-rose-300/90">
                 {item.detail}
-              </p>
-            )}
-            {!success && (
-              <p className="mt-1 text-[10px] text-rose-300/80">
-                请重新选择「下载到」目录后再试。
               </p>
             )}
           </div>
@@ -1182,12 +1173,6 @@ export function ResourcesPage() {
           </button>
         </div>
 
-        {bookmarkHint && (
-          <span className="absolute right-0 top-full mt-1 max-w-60 truncate text-[11px] text-emerald-400">
-            {bookmarkHint}
-          </span>
-        )}
-
         {bookmarksOpen && (
           <>
             <div
@@ -1268,7 +1253,7 @@ export function ResourcesPage() {
                     <div
                       key={tab.id}
                       data-tab-id={tab.id}
-                      className={`group flex min-w-[110px] max-w-[220px] shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                      className={`group flex min-w-[64px] max-w-[220px] flex-1 basis-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
                         active
                           ? "bg-neutral-800 text-neutral-100"
                           : "text-neutral-400 hover:bg-neutral-800/60"
@@ -1310,12 +1295,12 @@ export function ResourcesPage() {
             ref={areaRef}
             data-browser-area
             className={`relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden ${
-              hasTabs
+              hasTabs && !overlayOpen
                 ? "rounded-xl border border-neutral-800 bg-neutral-900"
                 : "bg-transparent"
             }`}
           >
-            {!hasTabs && (
+            {(!hasTabs || overlayOpen) && (
               <div className="flex flex-col items-center gap-3">
                 <Globe
                   size={72}
@@ -1483,22 +1468,7 @@ export function ResourcesPage() {
             </button>
           </div>
 
-          {magnetNotice && (
-            <p
-              className={`shrink-0 text-[11px] ${
-                magnetNotice.ok ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              {magnetNotice.text}
-            </p>
-          )}
-
-          {qbError ? (
-            <p className="rounded-lg border border-rose-900/60 bg-rose-950/30 px-3 py-2 text-[11px] leading-relaxed text-rose-300">
-              {qbError}
-            </p>
-          ) : (
-            <div className="flex min-h-0 flex-1 flex-col gap-2">
+          <div className="flex min-h-0 flex-1 flex-col gap-2">
               <div className="flex items-center justify-between text-[11px] text-neutral-500">
                 <span>当前目录任务</span>
                 <span className="tabular-nums">{qbTorrents.length} 条</span>
@@ -1577,7 +1547,6 @@ export function ResourcesPage() {
                 </div>
               )}
             </div>
-          )}
         </aside>
       </div>
 

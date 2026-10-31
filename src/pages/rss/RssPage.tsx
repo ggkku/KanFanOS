@@ -51,12 +51,15 @@ function formatTime(value: number | null): string {
   return new Date(value).toLocaleDateString("zh-CN");
 }
 
-function matchStatusLabel(status: string): string {
+function matchStatusLabel(
+  status: string,
+  autoDownloaded: boolean,
+): string {
   switch (status) {
     case "pending":
       return "待下载";
     case "queued":
-      return "已加入下载";
+      return autoDownloaded ? "已自动下载" : "已加入下载";
     case "ignored":
       return "已忽略";
     case "failed":
@@ -86,10 +89,10 @@ export function RssPage({
   const [matches, setMatches] = useState<RssMatch[]>([]);
   const [downloadRoot, setDownloadRoot] = useState("");
   const [downloadRootExists, setDownloadRootExists] = useState(true);
-  const [selectedFollowIds, setSelectedFollowIds] = useState<Set<number>>(
-    new Set(),
+  const [selectedFollowId, setSelectedFollowId] = useState<number | null>(
+    null,
   );
-  const selectedFollowIdsRef = useRef<Set<number> | null>(null);
+  const selectedFollowIdRef = useRef<number | null | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -101,13 +104,16 @@ export function RssPage({
   );
   const [editingFollow, setEditingFollow] = useState<RssFollow | null>(null);
 
-  const setSelection = (next: Set<number>) => {
-    selectedFollowIdsRef.current = next;
-    setSelectedFollowIds(new Set(next));
+  const setSelection = (followId: number | null) => {
+    selectedFollowIdRef.current = followId;
+    setSelectedFollowId(followId);
   };
 
-  const loadMatches = async (ids: Set<number>) => {
-    const nextMatches = await listRssMatches(80, [...ids]);
+  const loadMatches = async (followId: number | null) => {
+    const nextMatches = await listRssMatches(
+      80,
+      followId == null ? [] : [followId],
+    );
     setMatches(nextMatches);
   };
 
@@ -122,28 +128,23 @@ export function RssPage({
     setDownloadRoot(nextRoot.path);
     setDownloadRootExists(nextRoot.exists);
 
-    const validIds = new Set(nextFollows.map((follow) => follow.id));
-    const current = selectedFollowIdsRef.current;
+    const current = selectedFollowIdRef.current;
     const nextSelection =
-      current === null
-        ? validIds
-        : new Set([...current].filter((id) => validIds.has(id)));
+      current === undefined
+        ? nextFollows[0]?.id ?? null
+        : current !== null && nextFollows.some((follow) => follow.id === current)
+          ? current
+          : nextFollows[0]?.id ?? null;
     setSelection(nextSelection);
-
-    const nextMatches = await listRssMatches(80, [...nextSelection]);
-    setMatches(nextMatches);
+    await loadMatches(nextSelection);
   };
 
-  const toggleFollowSelection = (followId: number) => {
-    const current = selectedFollowIdsRef.current ?? new Set<number>();
-    const next = new Set(current);
-    if (next.has(followId)) {
-      next.delete(followId);
-    } else {
-      next.add(followId);
-    }
-    setSelection(next);
-    void loadMatches(next).catch((reason) => setError(errorMessage(reason)));
+  const selectFollow = (followId: number) => {
+    if (selectedFollowIdRef.current === followId) return;
+    setSelection(followId);
+    void loadMatches(followId).catch((reason) =>
+      setError(errorMessage(reason)),
+    );
   };
 
   useEffect(() => {
@@ -432,7 +433,7 @@ export function RssPage({
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-medium text-neutral-200">正在追</h2>
               <span className="text-[11px] text-neutral-500">
-                选中 {selectedFollowIds.size} / {follows.length} 部
+                选中 {selectedFollowId == null ? 0 : 1} / {follows.length} 部
               </span>
             </div>
             {follows.length === 0 ? (
@@ -442,14 +443,14 @@ export function RssPage({
             ) : (
               <div className="grid gap-3 md:grid-cols-2">
                 {follows.map((follow) => {
-                  const selected = selectedFollowIds.has(follow.id);
+                  const selected = selectedFollowId === follow.id;
                   const missingSavePath = follow.savePath
                     ? !follow.savePathExists
                     : !downloadRootExists;
                   return (
                   <div
                     key={follow.id}
-                    role="checkbox"
+                    role="radio"
                     aria-checked={selected}
                     tabIndex={0}
                     onClick={(event) => {
@@ -461,7 +462,7 @@ export function RssPage({
                       ) {
                         return;
                       }
-                      toggleFollowSelection(follow.id);
+                      selectFollow(follow.id);
                     }}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter" && event.key !== " ") return;
@@ -474,7 +475,7 @@ export function RssPage({
                         return;
                       }
                       event.preventDefault();
-                      toggleFollowSelection(follow.id);
+                      selectFollow(follow.id);
                     }}
                     className={`flex cursor-pointer flex-col gap-2 rounded-xl border p-4 transition-colors ${
                       selected
@@ -602,7 +603,7 @@ export function RssPage({
             </div>
             {matches.length === 0 ? (
               <p className="rounded-xl border border-dashed border-neutral-800 px-4 py-6 text-center text-xs text-neutral-500">
-                {selectedFollowIds.size === 0
+                {selectedFollowId == null
                   ? "还没有选中追番。点击上方追番卡片选择要查看的番剧。"
                   : "刷新 RSS 后，匹配到的更新会显示在这里。"}
               </p>
@@ -625,7 +626,18 @@ export function RssPage({
                         {item.followTitle}
                         {item.episode != null ? ` · 第 ${item.episode} 集` : ""}
                         {" · "}
-                        {matchStatusLabel(item.status)}
+                        <span
+                          className={
+                            item.status === "queued" && item.autoDownloaded
+                              ? "text-emerald-400"
+                              : ""
+                          }
+                        >
+                          {matchStatusLabel(
+                            item.status,
+                            item.autoDownloaded,
+                          )}
+                        </span>
                         {item.error ? ` · ${item.error}` : ""}
                       </div>
                     </div>
@@ -675,11 +687,7 @@ export function RssPage({
           onAdded={(follow) => {
             setFollowDialogOpen(false);
             setBrowserSeed(null);
-            const nextSelection = new Set(
-              selectedFollowIdsRef.current ?? [],
-            );
-            nextSelection.add(follow.id);
-            setSelection(nextSelection);
+            setSelection(follow.id);
             setNotice(`开始追番：${follow.title}`);
             void reload();
           }}

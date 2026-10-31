@@ -50,6 +50,7 @@ export interface RssMatch {
   episode: number | null;
   confidence: number;
   status: string;
+  autoDownloaded: boolean;
   error: string | null;
   createdAt: number;
 }

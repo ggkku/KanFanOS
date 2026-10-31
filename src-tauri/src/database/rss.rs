@@ -68,6 +68,7 @@ pub struct RssMatch {
     pub episode: Option<i64>,
     pub confidence: i64,
     pub status: String,
+    pub auto_downloaded: bool,
     pub error: Option<String>,
     pub created_at: i64,
 }
@@ -340,7 +341,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT m.id, m.entry_id, m.follow_id, f.title, e.title, e.link,
                     e.download_url, e.published_at, m.episode, m.confidence,
-                    m.status, m.error, m.created_at
+                    m.status, m.auto_downloaded, m.error, m.created_at
                FROM rss_matches m
                JOIN rss_entries e ON e.id = m.entry_id
                JOIN rss_follows f ON f.id = m.follow_id
@@ -360,7 +361,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT m.id, m.entry_id, m.follow_id, f.title, e.title, e.link,
                     e.download_url, e.published_at, m.episode, m.confidence,
-                    m.status, m.error, m.created_at
+                    m.status, m.auto_downloaded, m.error, m.created_at
                FROM rss_matches m
                JOIN rss_entries e ON e.id = m.entry_id
                JOIN rss_follows f ON f.id = m.follow_id
@@ -389,7 +390,7 @@ impl Database {
         let sql = format!(
             "SELECT m.id, m.entry_id, m.follow_id, f.title, e.title, e.link,
                     e.download_url, e.published_at, m.episode, m.confidence,
-                    m.status, m.error, m.created_at
+                    m.status, m.auto_downloaded, m.error, m.created_at
                FROM rss_matches m
                JOIN rss_entries e ON e.id = m.entry_id
                JOIN rss_follows f ON f.id = m.follow_id
@@ -415,7 +416,7 @@ impl Database {
             .query_row(
                 "SELECT m.id, m.entry_id, m.follow_id, f.title, e.title, e.link,
                         e.download_url, e.published_at, m.episode, m.confidence,
-                        m.status, m.error, m.created_at
+                        m.status, m.auto_downloaded, m.error, m.created_at
                    FROM rss_matches m
                    JOIN rss_entries e ON e.id = m.entry_id
                    JOIN rss_follows f ON f.id = m.follow_id
@@ -436,6 +437,16 @@ impl Database {
         self.conn()?.execute(
             "UPDATE rss_matches SET status = ?2, error = ?3, updated_at = ?4 WHERE id = ?1",
             params![id, status, error, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_rss_match_queued(&self, id: i64, auto_downloaded: bool, now: i64) -> Result<()> {
+        self.conn()?.execute(
+            "UPDATE rss_matches
+                SET status = 'queued', auto_downloaded = ?2, error = NULL, updated_at = ?3
+              WHERE id = ?1",
+            params![id, if auto_downloaded { 1 } else { 0 }, now],
         )?;
         Ok(())
     }
@@ -503,8 +514,9 @@ fn map_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<RssMatch> {
         episode: row.get(8)?,
         confidence: row.get(9)?,
         status: row.get(10)?,
-        error: row.get(11)?,
-        created_at: row.get(12)?,
+        auto_downloaded: row.get::<_, i64>(11)? != 0,
+        error: row.get(12)?,
+        created_at: row.get(13)?,
     })
 }
 
@@ -608,6 +620,10 @@ mod tests {
 
         db.set_rss_follow_last_episode(follow.id, 1).unwrap();
         db.set_rss_match_status(pending[0].id, "queued", None, 14).unwrap();
+        db.mark_rss_match_queued(pending[0].id, true, 15).unwrap();
+        assert!(db.get_rss_match(pending[0].id).unwrap().unwrap().auto_downloaded);
+        db.mark_rss_match_queued(pending[0].id, false, 16).unwrap();
+        assert!(!db.get_rss_match(pending[0].id).unwrap().unwrap().auto_downloaded);
         assert!(db
             .get_rss_follow(follow.id)
             .unwrap()

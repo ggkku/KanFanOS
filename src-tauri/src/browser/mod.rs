@@ -415,6 +415,33 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
     return text;
   }
 
+  function selectedInputText(node) {
+    if (!node || !node.closest) return null;
+    var element = node.closest("input, textarea");
+    if (!element) return null;
+    if (element.tagName === "INPUT") {
+      var type = String(element.type || "text").toLowerCase();
+      if (
+        /^(button|checkbox|color|file|hidden|image|radio|range|reset|submit|password)$/.test(
+          type
+        )
+      ) {
+        return null;
+      }
+    }
+    var start = element.selectionStart;
+    var end = element.selectionEnd;
+    if (typeof start !== "number" || typeof end !== "number" || end <= start) {
+      return null;
+    }
+    var text = String(element.value || "").slice(start, end).trim();
+    return text || null;
+  }
+
+  function selectedTextFor(node) {
+    return selectedInputText(node) || selectedText();
+  }
+
   function editableFor(node) {
     var element = node.closest(
       'input, textarea, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]'
@@ -675,7 +702,7 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
       }
       var img = node.closest("img");
       var url = img ? imageUrlFor(img) : null;
-      var text = selectedText();
+      var text = selectedTextFor(node);
       var editable = editableFor(node);
       if (!url && !text && !editable) {
         hide();

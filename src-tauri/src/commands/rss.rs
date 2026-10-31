@@ -249,12 +249,14 @@ pub async fn rss_download_match(app: AppHandle, match_id: i64) -> Result<(), Str
         .map_err(to_message)?
         .context("追番订阅不存在")
         .map_err(to_message)?;
-    queue_download(&app, &item, &follow).await.map_err(to_message)
+    queue_download(&app, &item, &follow, false)
+        .await
+        .map_err(to_message)
 }
 
 pub fn spawn_scheduler(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(45)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
             let has_feeds = app
                 .state::<AppState>()
@@ -430,7 +432,7 @@ async fn auto_download_latest(app: &AppHandle) -> usize {
         };
         let candidate_episode = candidate.episode.unwrap_or(0);
 
-        match queue_download(app, candidate, &follow).await {
+        match queue_download(app, candidate, &follow, true).await {
             Ok(()) => {
                 // 既然只补最新一集，下载成功后再把旧集从待确认里清掉。
                 for item in pending.iter().filter(|item| {
@@ -475,7 +477,12 @@ fn normalize_save_path(value: Option<&str>) -> AnyResult<Option<String>> {
     Ok(Some(normalized))
 }
 
-async fn queue_download(app: &AppHandle, item: &RssMatch, follow: &RssFollow) -> AnyResult<()> {
+async fn queue_download(
+    app: &AppHandle,
+    item: &RssMatch,
+    follow: &RssFollow,
+    automatic: bool,
+) -> AnyResult<()> {
     let url = if item.download_url.trim().is_empty() {
         item.link.clone()
     } else {
@@ -521,7 +528,7 @@ async fn queue_download(app: &AppHandle, item: &RssMatch, follow: &RssFollow) ->
         bail!("不支持的种子地址：{url}");
     }
     let db = &app.state::<AppState>().db;
-    db.set_rss_match_status(item.id, "queued", None, now_ms())?;
+    db.mark_rss_match_queued(item.id, automatic, now_ms())?;
     if let Some(episode) = item.episode
         && follow.last_episode.unwrap_or(0) < episode
     {
@@ -554,6 +561,7 @@ mod tests {
             episode: Some(episode),
             confidence,
             status: "pending".to_string(),
+            auto_downloaded: false,
             error: None,
             created_at: 0,
         }

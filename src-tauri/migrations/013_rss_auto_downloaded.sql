@@ -1,0 +1,1 @@
+ALTER TABLE rss_matches ADD COLUMN auto_downloaded INTEGER NOT NULL DEFAULT 0;
