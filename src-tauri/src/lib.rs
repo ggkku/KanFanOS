@@ -180,6 +180,9 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
         });
     }
 
+    // 内置 qBittorrent 跟随应用启动，资源页只负责连接和展示。
+    commands::resources::spawn_qbittorrent_at_startup(app.handle().clone());
+
     Ok(())
 }
 
@@ -198,6 +201,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::library::get_library_stats,
+            commands::library::series_name_conflicts,
             commands::library::scan_library,
             commands::library::cancel_scan,
             commands::settings::get_settings,
@@ -251,6 +255,7 @@ pub fn run() {
             commands::rss::rss_parse_release_title,
             commands::rss::rss_list_follows,
             commands::rss::rss_list_matches,
+            commands::rss::rss_series_badges,
             commands::rss::rss_list_entries,
             commands::rss::rss_add_feed,
             commands::rss::rss_refresh_feed,

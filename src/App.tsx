@@ -8,6 +8,8 @@ import { AppShell } from "./components/layout/AppShell";
 import { MediaBanner } from "./components/media/MediaBanner";
 import { PlayerDrawer } from "./components/player/PlayerDrawer";
 import { ScanBanner } from "./components/scan/ScanBanner";
+import { SeriesContextMenu } from "./components/series/SeriesContextMenu";
+import type { SeriesContextMenuState } from "./components/series/SeriesContextMenu";
 import { SeriesDetail } from "./components/series/SeriesDetail";
 import { SeriesExtras } from "./components/series/SeriesExtras";
 import { SetupScreen } from "./components/setup/SetupScreen";
@@ -22,6 +24,7 @@ import {
   cancelScan,
   getMediaStats,
   getSeries,
+  getSeriesNameConflicts,
   getSettings,
   listCategories,
   listEpisodes,
@@ -39,6 +42,7 @@ import {
 import { errorMessage } from "./lib/errors";
 import { sortEpisodes } from "./lib/episodes";
 import { seriesCoverUrl } from "./lib/thumbnails";
+import { listRssSeriesBadges } from "./api/rss";
 import type {
   AppSettings,
   CategorySummary,
@@ -125,6 +129,10 @@ function App() {
   const [categories, setCategories] = useState<CategorySummary[]>([]);
   const [series, setSeries] = useState<SeriesSummary[]>([]);
   const [seriesTotal, setSeriesTotal] = useState(0);
+  const [rssBadges, setRssBadges] = useState<Record<number, number>>({});
+  const [duplicateSeriesNames, setDuplicateSeriesNames] = useState<
+    Record<string, number>
+  >({});
   const [loadingMore, setLoadingMore] = useState(false);
   const [sort, setSort] = useState<SeriesSort>("name");
   const [query, setQuery] = useState("");
@@ -146,6 +154,8 @@ function App() {
   const [selectedSeries, setSelectedSeries] = useState<SeriesSummary | null>(
     null,
   );
+  const [seriesContextMenu, setSeriesContextMenu] =
+    useState<SeriesContextMenuState | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeSummary[]>([]);
   const [extraEpisodes, setExtraEpisodes] = useState<EpisodeSummary[]>([]);
   const [extrasOpen, setExtrasOpen] = useState(false);
@@ -364,6 +374,61 @@ function App() {
       disposed = true;
     };
   }, [view, settings?.libraryId, refreshKey, sort]);
+
+  // 选番页的“未看视频”标记：只统计正在追番剧的下载目录。
+  useEffect(() => {
+    if (view.kind !== "category" || settings?.libraryId == null) {
+      setRssBadges({});
+      return;
+    }
+    const libraryId = settings.libraryId;
+    let disposed = false;
+    const load = () => {
+      listRssSeriesBadges(libraryId)
+        .then((items) => {
+          if (disposed) return;
+          setRssBadges(
+            Object.fromEntries(
+              items.map((item) => [item.seriesId, item.unwatchedCount]),
+            ),
+          );
+        })
+        .catch(() => {
+          if (!disposed) setRssBadges({});
+        });
+    };
+    void load();
+    const timer = window.setInterval(load, 30000);
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [view.kind, settings?.libraryId, refreshKey]);
+
+  // 同名番剧在封面上提醒，避免选错条目。
+  useEffect(() => {
+    if (settings?.libraryId == null) {
+      setDuplicateSeriesNames({});
+      return;
+    }
+    let disposed = false;
+    getSeriesNameConflicts(settings.libraryId)
+      .then((items) => {
+        if (disposed) return;
+        setDuplicateSeriesNames(
+          Object.fromEntries(items.map((item) => [item.name, item.count])),
+        );
+      })
+      .catch(() => {
+        if (!disposed) setDuplicateSeriesNames({});
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [settings?.libraryId, refreshKey]);
 
   // 搜索带 250ms 防抖，结果按页加载。
   useEffect(() => {
@@ -1092,6 +1157,15 @@ function App() {
         total={searchTotal}
         loading={searchLoading}
         loadingMore={searchLoadingMore}
+        badges={rssBadges}
+        duplicateNames={duplicateSeriesNames}
+        onSeriesContextMenu={(series, event) =>
+          setSeriesContextMenu({
+            series,
+            x: event.clientX,
+            y: event.clientY,
+          })
+        }
         onOpenSeries={(item, rect) => void openSeries(item, rect)}
         onLoadMore={() => void loadMoreSearch()}
       />
@@ -1131,6 +1205,15 @@ function App() {
         loadingMore={loadingMore}
         scanning={scanning}
         sort={sort}
+        badges={rssBadges}
+        duplicateNames={duplicateSeriesNames}
+        onSeriesContextMenu={(series, event) =>
+          setSeriesContextMenu({
+            series,
+            x: event.clientX,
+            y: event.clientY,
+          })
+        }
         onSortChange={setSort}
         onOpenSeries={(item, rect) => void openSeries(item, rect)}
         onRescan={rescan}
@@ -1457,6 +1540,12 @@ function App() {
           }}
         />
       )}
+
+      <SeriesContextMenu
+        menu={seriesContextMenu}
+        onClose={() => setSeriesContextMenu(null)}
+        onError={(message) => setError(message)}
+      />
     </>
   );
 }

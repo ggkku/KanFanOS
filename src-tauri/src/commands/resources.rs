@@ -910,6 +910,33 @@ pub async fn qbittorrent_list_torrents(
     })
 }
 
+/// 应用启动时直接拉起内置 qBittorrent，而不是等用户进入资源页。
+pub fn spawn_qbittorrent_at_startup(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let manager = app.state::<ManagedQbittorrent>();
+        let config = match load_config(state.inner()) {
+            Ok(config) => config,
+            Err(error) => {
+                crate::paths::append_log(
+                    &state.data_root,
+                    &format!("读取 qBittorrent 配置失败: {error:#}"),
+                );
+                return;
+            }
+        };
+        if config.mode == QBITTORRENT_MODE_EXTERNAL {
+            return;
+        }
+        if let Err(error) = resolve_endpoint(state.inner(), manager.inner(), &config).await {
+            crate::paths::append_log(
+                &state.data_root,
+                &format!("应用启动时启动 qBittorrent 失败: {error:#}"),
+            );
+        }
+    });
+}
+
 /// 内嵌浏览器捕获到磁力链接或 .torrent 链接后调用。
 ///
 /// 在后台任务里添加种子，完成后通过 `qbittorrent-torrent` 事件通知前端，

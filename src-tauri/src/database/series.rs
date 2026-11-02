@@ -289,6 +289,35 @@ impl Database {
         Ok(categories)
     }
 
+    pub fn series_badge_targets(&self, library_id: i64) -> Result<Vec<(i64, String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, path, name FROM series
+              WHERE library_id = ?1
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map([library_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn series_name_conflicts(&self, library_id: i64) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT LOWER(TRIM(name)) AS normalized_name, COUNT(*) AS count
+               FROM series
+              WHERE library_id = ?1
+              GROUP BY normalized_name
+             HAVING COUNT(*) > 1
+              ORDER BY normalized_name",
+        )?;
+        let rows = stmt.query_map([library_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn get_series(&self, id: i64) -> Result<SeriesSummary> {
         let conn = self.conn()?;
         conn.query_row(

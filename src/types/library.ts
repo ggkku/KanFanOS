@@ -80,6 +80,11 @@ export interface SeriesPage {
   total: number;
 }
 
+export interface SeriesNameConflict {
+  name: string;
+  count: number;
+}
+
 export interface SearchItem extends SeriesSummary {
   matchedEpisodes: number;
   matchPreview: string | null;

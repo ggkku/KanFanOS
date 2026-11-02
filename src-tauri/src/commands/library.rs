@@ -25,6 +25,29 @@ pub fn get_library_stats(state: State<'_, AppState>) -> Result<LibraryStats, Str
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesNameConflict {
+    pub name: String,
+    pub count: i64,
+}
+
+#[tauri::command]
+pub fn series_name_conflicts(
+    state: State<'_, AppState>,
+    library_id: i64,
+) -> Result<Vec<SeriesNameConflict>, String> {
+    state
+        .db
+        .series_name_conflicts(library_id)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(name, count)| SeriesNameConflict { name, count })
+                .collect()
+        })
+        .map_err(to_message)
+}
+
 /// 扫描是阻塞操作，放到后台线程执行；进度通过事件推送。
 #[tauri::command(async)]
 pub fn scan_library(app: AppHandle, library_id: i64) -> Result<ScanSummary, String> {

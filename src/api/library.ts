@@ -25,6 +25,7 @@ import type {
   SearchPage,
   SeasonLinkConflict,
   SeriesConfigView,
+  SeriesNameConflict,
   SeriesOption,
   SeriesPage,
   SeriesSort,
@@ -111,6 +112,12 @@ export function listSeries(
     offset,
     limit,
   });
+}
+
+export function getSeriesNameConflicts(
+  libraryId: number,
+): Promise<SeriesNameConflict[]> {
+  return invoke<SeriesNameConflict[]>("series_name_conflicts", { libraryId });
 }
 
 export function searchSeries(

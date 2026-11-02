@@ -50,6 +50,7 @@ import type {
   EpisodeSummary,
   PlayerState,
   SeriesSummary,
+  SubtitleTrack,
 } from "../../types/library";
 
 interface PlayerDrawerProps {
@@ -81,6 +82,8 @@ const CONTROLS_HIDE_DURATION_MS = 300;
 
 /** 自动连播是应用级偏好，不随番剧/集数重置。 */
 const AUTO_PLAY_NEXT_STORAGE_KEY = "kanfanos.player.autoPlayNext";
+const AUDIO_DEVICE_STORAGE_KEY = "kanfanos.player.audioDevice";
+const SUBTITLE_PREFERENCE_STORAGE_KEY = "kanfanos.player.subtitle";
 
 function readAutoPlayNextPreference(): boolean {
   try {
@@ -91,6 +94,91 @@ function readAutoPlayNextPreference(): boolean {
 }
 
 let autoPlayNextPreference = readAutoPlayNextPreference();
+
+function readAudioDevicePreference(): string | null {
+  try {
+    const value = window.localStorage
+      .getItem(AUDIO_DEVICE_STORAGE_KEY)
+      ?.trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+let audioDevicePreference = readAudioDevicePreference();
+
+interface SubtitlePreference {
+  off: boolean;
+  id: number;
+  title: string;
+  lang: string;
+}
+
+function readSubtitlePreference(): SubtitlePreference | null {
+  try {
+    const raw = window.localStorage.getItem(SUBTITLE_PREFERENCE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SubtitlePreference>;
+    if (typeof parsed.off !== "boolean") return null;
+    return {
+      off: parsed.off,
+      id: typeof parsed.id === "number" ? parsed.id : 0,
+      title: typeof parsed.title === "string" ? parsed.title : "",
+      lang: typeof parsed.lang === "string" ? parsed.lang : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveSubtitlePreference(preference: SubtitlePreference) {
+  try {
+    window.localStorage.setItem(
+      SUBTITLE_PREFERENCE_STORAGE_KEY,
+      JSON.stringify(preference),
+    );
+  } catch {
+    // localStorage 不可用时只保留本次运行内的偏好。
+  }
+}
+
+let subtitlePreference = readSubtitlePreference();
+
+function subtitleMatchKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function findSubtitleTrack(
+  tracks: SubtitleTrack[],
+  preference: SubtitlePreference,
+): SubtitleTrack | null {
+  const title = subtitleMatchKey(preference.title);
+  const lang = subtitleMatchKey(preference.lang);
+  if (title || lang) {
+    const exact = tracks.find(
+      (track) =>
+        subtitleMatchKey(track.title) === title &&
+        subtitleMatchKey(track.lang) === lang,
+    );
+    if (exact) return exact;
+  }
+  if (title) {
+    const byTitle = tracks.find(
+      (track) => subtitleMatchKey(track.title) === title,
+    );
+    if (byTitle) return byTitle;
+  }
+  const byId = tracks.find((track) => track.id === preference.id);
+  if (byId) return byId;
+  if (lang) {
+    const byLang = tracks.filter(
+      (track) => subtitleMatchKey(track.lang) === lang,
+    );
+    if (byLang.length === 1) return byLang[0];
+  }
+  return null;
+}
 
 /// 把视频区域矩形按视频宽高比居中收缩，得到实际画面窗口。
 /// 这样原生窗口始终与视频同比例，宽高永远一起变化。
@@ -159,6 +247,10 @@ export function PlayerDrawer({
   const [starting, setStarting] = useState(true);
   const [playerState, setPlayerState] = useState<PlayerState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [audioNotice, setAudioNotice] = useState<{
+    text: string;
+    kind: "warning" | "success";
+  } | null>(null);
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
   // 松手后先保持目标位置，等播放器回报接近目标后再跟随实时进度。
   const [seekTarget, setSeekTarget] = useState<number | null>(null);
@@ -196,8 +288,29 @@ export function PlayerDrawer({
   const subtitleDelayRef = useRef(0);
   // 点击画面收起控制栏后的鼠标冷却截止时间。
   const controlsCooldownUntilRef = useRef(0);
+  // 自动连播切集时短暂屏蔽鼠标唤出控制栏。
+  const suppressControlsUntilRef = useRef(0);
   // 防止同一集的 ended 状态重复触发自动下一集。
   const autoAdvancedRef = useRef(false);
+  // 播放位置长时间不动时做一次 seek 自恢复，处理 mpv 启动/精确 seek 卡住。
+  const stallRef = useRef({
+    position: -1,
+    since: 0,
+    attempts: 0,
+  });  // 音频设备等真正的播放进度开始推进后再应用，避免 mpv 还在启动 seek 时切设备。
+  const audioProgressRef = useRef<{
+    episodeId: number;
+    position: number;
+  } | null>(null);  // 已应用音频设备偏好的集数，避免每集重复发送命令。
+  const appliedAudioDeviceRef = useRef<number | null>(null);
+  const appliedSubtitleRef = useRef<number | null>(null);
+  const subtitleProgressRef = useRef<{
+    episodeId: number;
+    position: number;
+  } | null>(null);
+  // 当前集是否因为设备消失而回退到系统默认。
+  const audioFallbackRef = useRef(false);
+  const audioNoticeTimerRef = useRef<number | undefined>(undefined);
 
   const hideControls = useCallback(() => {
     controlsCooldownUntilRef.current =
@@ -207,6 +320,36 @@ export function PlayerDrawer({
     setAudioOutputMenuOpen(false);
     setControlsVisible(false);
   }, []);
+  const clearAudioNotice = useCallback(() => {
+    if (audioNoticeTimerRef.current !== undefined) {
+      window.clearTimeout(audioNoticeTimerRef.current);
+      audioNoticeTimerRef.current = undefined;
+    }
+    setAudioNotice(null);
+  }, []);
+
+  const showAudioNotice = useCallback(
+    (text: string, kind: "warning" | "success") => {
+      if (audioNoticeTimerRef.current !== undefined) {
+        window.clearTimeout(audioNoticeTimerRef.current);
+      }
+      setAudioNotice({ text, kind });
+      audioNoticeTimerRef.current = window.setTimeout(() => {
+        audioNoticeTimerRef.current = undefined;
+        setAudioNotice(null);
+      }, 4500);
+    },
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      if (audioNoticeTimerRef.current !== undefined) {
+        window.clearTimeout(audioNoticeTimerRef.current);
+      }
+    },
+    [],
+  );
   // 控制栏：全屏切换时逐帧跟随视频矩形。
   const controlsRef = useRef<HTMLDivElement>(null);
 
@@ -297,6 +440,36 @@ export function PlayerDrawer({
     subtitleDelayRef.current = 0;
     setSubtitleDelayMs(0);
   }, [episode.id]);
+  useEffect(() => {
+    stallRef.current = { position: -1, since: 0, attempts: 0 };
+  }, [episode.id]);
+
+  // mpv 偶尔会卡在启动时的 --start 精确 seek（time-pos 不动、paused=false）。
+  // 位置连续 4 秒不前进时向当前位置后 750ms 再发一次 seek；最多重试两次。
+  useEffect(() => {
+    if (!playerState || playerState.episodeId !== episode.id) return;
+    if (playerState.paused || playerState.ended) {
+      stallRef.current = { position: -1, since: 0, attempts: 0 };
+      return;
+    }
+    const now = performance.now();
+    const stall = stallRef.current;
+    if (
+      stall.position < 0 ||
+      Math.abs(playerState.positionMs - stall.position) > 300
+    ) {
+      stallRef.current = {
+        position: playerState.positionMs,
+        since: now,
+        attempts: 0,
+      };
+      return;
+    }
+    if (stall.attempts >= 2 || now - stall.since < 4000) return;
+    stall.attempts += 1;
+    stall.since = now;
+    void playerSeek(playerState.positionMs + 750);
+  }, [playerState, episode.id]);
 
   // 订阅播放状态。
   useEffect(() => {
@@ -339,6 +512,110 @@ export function PlayerDrawer({
     };
   }, [episode.id]);
 
+  useEffect(() => {
+    audioProgressRef.current = null;
+    appliedSubtitleRef.current = null;
+    subtitleProgressRef.current = null;
+    clearAudioNotice();
+  }, [episode.id, clearAudioNotice]);
+  // mpv 每次换集都是新进程；把上次选择的音频输出设备重新应用回去。
+  // 设备不可用时回退到 auto，但保留偏好，设备恢复后自动切回。
+  useEffect(() => {
+    if (!playerState || playerState.episodeId !== episode.id) return;
+    const preferred = audioDevicePreference;
+    if (!preferred || preferred === "auto") {
+      appliedAudioDeviceRef.current = episode.id;
+      audioFallbackRef.current = false;
+      return;
+    }
+    const devices = playerState.audioDevices;
+    if (devices.length === 0) return;
+    const present = devices.some((device) => device.name === preferred);
+
+    if (appliedAudioDeviceRef.current !== episode.id) {
+      const previous = audioProgressRef.current;
+      if (
+        !previous ||
+        previous.episodeId !== episode.id ||
+        Math.abs(playerState.positionMs - previous.position) < 250
+      ) {
+        audioProgressRef.current = {
+          episodeId: episode.id,
+          position: playerState.positionMs,
+        };
+        return;
+      }
+      audioProgressRef.current = {
+        episodeId: episode.id,
+        position: playerState.positionMs,
+      };
+      appliedAudioDeviceRef.current = episode.id;
+      if (present) {
+        audioFallbackRef.current = false;
+        void playerSetAudioDevice(preferred).catch(() => {});
+      } else {
+        audioFallbackRef.current = true;
+        void playerSetAudioDevice("auto").catch(() => {});
+        showAudioNotice(
+          `音频设备不可用，已回退系统默认：${preferred}`,
+          "warning",
+        );
+      }
+      return;
+    }
+
+    if (!present && !audioFallbackRef.current) {
+      audioFallbackRef.current = true;
+      void playerSetAudioDevice("auto").catch(() => {});
+      showAudioNotice(
+        `音频设备已断开，已回退系统默认：${preferred}`,
+        "warning",
+      );
+    } else if (present && audioFallbackRef.current) {
+      audioFallbackRef.current = false;
+      void playerSetAudioDevice(preferred).catch(() => {});
+      showAudioNotice(`音频设备已恢复：${preferred}`, "success");
+    }
+  }, [episode.id, playerState, showAudioNotice]);
+
+  // 记住用户选过的字幕轨道；新一集用标题/语言重新匹配，不依赖会变化的 sid。
+  useEffect(() => {
+    if (!playerState || playerState.episodeId !== episode.id) return;
+    if (!subtitlePreference) return;
+    if (appliedSubtitleRef.current === episode.id) return;
+    if (playerState.subtitles.length === 0) return;
+
+    const previous = subtitleProgressRef.current;
+    if (
+      !previous ||
+      previous.episodeId !== episode.id ||
+      Math.abs(playerState.positionMs - previous.position) < 250
+    ) {
+      subtitleProgressRef.current = {
+        episodeId: episode.id,
+        position: playerState.positionMs,
+      };
+      return;
+    }
+    subtitleProgressRef.current = {
+      episodeId: episode.id,
+      position: playerState.positionMs,
+    };
+
+    if (subtitlePreference.off) {
+      appliedSubtitleRef.current = episode.id;
+      void playerSetSubtitle(null).catch(() => {});
+      return;
+    }
+    const track = findSubtitleTrack(
+      playerState.subtitles,
+      subtitlePreference,
+    );
+    if (!track) return;
+    appliedSubtitleRef.current = episode.id;
+    void playerSetSubtitle(track.id).catch(() => {});
+  }, [episode.id, playerState]);
+
   // 鼠标活动：后端轮询系统光标，视频画面上方的移动也能收到。
   useEffect(() => {
     let disposed = false;
@@ -346,6 +623,8 @@ export function PlayerDrawer({
 
     onPlayerMouseActivity(() => {
       if (disposed) return;
+      // 自动连播切集时不让新播放器启动阶段的鼠标移动把控制栏顶出来。
+      if (performance.now() < suppressControlsUntilRef.current) return;
       // 点击画面收起控制栏后，留出和收起动画相同的冷却时间，
       // 避免鼠标刚移动就立刻把控制栏弹回来。
       if (performance.now() < controlsCooldownUntilRef.current) return;
@@ -551,6 +830,11 @@ export function PlayerDrawer({
     if (!ended || !autoPlayNext || !next || autoAdvancedRef.current) return;
     if (playerState?.episodeId !== episode.id) return;
     autoAdvancedRef.current = true;
+    if (fullscreen) {
+      // 自动连播切到下一集时保持全屏沉浸，不让控制栏在启动阶段弹出来。
+      suppressControlsUntilRef.current = performance.now() + 2500;
+      hideControls();
+    }
     onSelectEpisode(next);
   }, [
     ended,
@@ -558,6 +842,8 @@ export function PlayerDrawer({
     next,
     episode.id,
     playerState?.episodeId,
+    fullscreen,
+    hideControls,
     onSelectEpisode,
   ]);
 
@@ -594,6 +880,20 @@ export function PlayerDrawer({
 
   const selectSubtitle = (id: number | null) => {
     // 切换轨道后保留字幕面板，方便继续调时间或换另一条字幕。
+    if (id == null) {
+      subtitlePreference = { off: true, id: 0, title: "", lang: "" };
+    } else {
+      const track = subtitleTracks.find((item) => item.id === id);
+      if (!track) return;
+      subtitlePreference = {
+        off: false,
+        id: track.id,
+        title: track.title,
+        lang: track.lang,
+      };
+    }
+    saveSubtitlePreference(subtitlePreference);
+    appliedSubtitleRef.current = episode.id;
     setAudioMenuOpen(false);
     setAudioOutputMenuOpen(false);
     void playerSetSubtitle(id);
@@ -605,6 +905,15 @@ export function PlayerDrawer({
   };
 
   const selectAudioDevice = (device: string) => {
+    audioDevicePreference = device;
+    audioFallbackRef.current = false;
+    try {
+      window.localStorage.setItem(AUDIO_DEVICE_STORAGE_KEY, device);
+    } catch {
+      // localStorage 不可用时只保留本次运行内的偏好。
+    }
+    appliedAudioDeviceRef.current = episode.id;
+    clearAudioNotice();
     closeMenus();
     void playerSetAudioDevice(device);
   };
@@ -1003,6 +1312,25 @@ export function PlayerDrawer({
         {error && (
           <div className="shrink-0 border-b border-red-900/60 bg-red-950/40 px-4 py-2 text-xs text-red-300">
             {error}
+          </div>
+        )}
+        {audioNotice && (
+          <div
+            className={`flex shrink-0 items-center justify-between gap-3 border-b px-4 py-1.5 text-[11px] ${
+              audioNotice.kind === "success"
+                ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-200"
+                : "border-amber-900/60 bg-amber-950/40 text-amber-200"
+            }`}
+          >
+            <span className="min-w-0 truncate">{audioNotice.text}</span>
+            <button
+              type="button"
+              onClick={clearAudioNotice}
+              className="shrink-0 rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
+              aria-label="关闭音频设备提示"
+            >
+              <X size={12} />
+            </button>
           </div>
         )}
 

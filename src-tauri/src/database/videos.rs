@@ -461,6 +461,19 @@ impl Database {
         Ok(changed)
     }
 
+    pub fn watched_video_paths(&self) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT v.path
+               FROM videos v
+               JOIN watch_history w ON w.video_id = v.id
+              WHERE v.status <> 'missing'",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(Into::into)
+    }
+
     pub fn media_stats(&self, library_id: i64) -> Result<MediaStats> {
         Ok(self.conn()?.query_row(
             "SELECT

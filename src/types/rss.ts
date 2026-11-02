@@ -82,3 +82,8 @@ export interface ParsedReleaseTitle {
   container: string | null;
   confidence: number;
 }
+
+export interface RssSeriesBadge {
+  seriesId: number;
+  unwatchedCount: number;
+}

@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { Loader2, Search } from "lucide-react";
 import { EmptyState } from "../../components/common/EmptyState";
 import { SeriesCard } from "../../components/series/SeriesCard";
@@ -10,7 +11,13 @@ interface SearchPageProps {
   total: number;
   loading: boolean;
   loadingMore: boolean;
+  badges: Record<number, number>;
+  duplicateNames: Record<string, number>;
   onOpenSeries: (item: SearchItem, coverRect: DOMRect | null) => void;
+  onSeriesContextMenu: (
+    series: SearchItem,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => void;
   onLoadMore: () => void;
 }
 
@@ -20,7 +27,10 @@ export function SearchPage({
   total,
   loading,
   loadingMore,
+  badges,
+  duplicateNames,
   onOpenSeries,
+  onSeriesContextMenu,
   onLoadMore,
 }: SearchPageProps) {
   return (
@@ -50,11 +60,16 @@ export function SearchPage({
                 key={item.id}
                 series={item}
                 coverUrl={seriesCoverUrl(item)}
+                unwatchedCount={badges[item.id] ?? 0}
+                duplicateCount={
+                  duplicateNames[item.name.trim().toLowerCase()] ?? 0
+                }
                 subtitle={
                   item.matchPreview
                     ? `${item.category} · ${item.matchPreview}`
                     : item.category
                 }
+                onContextMenu={(event) => onSeriesContextMenu(item, event)}
                 onOpen={(rect) => onOpenSeries(item, rect)}
               />
             ))}

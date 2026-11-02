@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { CSSProperties } from "react";
-import { Trophy } from "lucide-react";
+import type { CSSProperties, MouseEvent } from "react";
+import { AlertTriangle, Trophy } from "lucide-react";
 import { getSeriesAwards } from "../../api/library";
 import type { SeriesSummary } from "../../types/library";
 import {
@@ -13,6 +13,12 @@ interface SeriesCardProps {
   series: SeriesSummary;
   coverUrl: string | null;
   subtitle?: string | null;
+  unwatchedCount?: number;
+  duplicateCount?: number;
+  onContextMenu?: (
+    event: MouseEvent<HTMLButtonElement>,
+    series: SeriesSummary,
+  ) => void;
   /// 打开时把封面的屏幕位置传出去，用于「封面飞入」过渡。
   onOpen: (coverRect: DOMRect | null) => void;
 }
@@ -21,6 +27,9 @@ export function SeriesCard({
   series,
   coverUrl,
   subtitle,
+  unwatchedCount = 0,
+  duplicateCount = 0,
+  onContextMenu,
   onOpen,
 }: SeriesCardProps) {
   const [imageFailed, setImageFailed] = useState(false);
@@ -55,6 +64,10 @@ export function SeriesCard({
       type="button"
       onMouseEnter={loadAwards}
       onFocus={loadAwards}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu?.(event, series);
+      }}
       onClick={() =>
         onOpen(coverRef.current?.getBoundingClientRect() ?? null)
       }
@@ -86,6 +99,28 @@ export function SeriesCard({
             <span className="text-4xl font-semibold text-neutral-700 transition-colors group-hover:text-neutral-600">
               {series.name.slice(0, 1)}
             </span>
+          </div>
+        )}
+
+        {(unwatchedCount > 0 || duplicateCount > 1) && (
+          <div className="absolute left-2 top-2 flex flex-col items-start gap-1">
+            {unwatchedCount > 0 && (
+              <span
+                title={`有 ${unwatchedCount} 个未观看视频`}
+                className="rounded-md bg-amber-400 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-neutral-950 shadow-sm"
+              >
+                新 {unwatchedCount > 99 ? "99+" : unwatchedCount}
+              </span>
+            )}
+            {duplicateCount > 1 && (
+              <span
+                title={`有 ${duplicateCount} 部同名番剧，请注意区分目录`}
+                className="inline-flex items-center gap-1 rounded-md bg-rose-500/90 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm"
+              >
+                <AlertTriangle size={10} />
+                同名 {duplicateCount}
+              </span>
+            )}
           </div>
         )}
 

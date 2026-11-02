@@ -7,10 +7,17 @@ import type {
   RssFollow,
   RssMatch,
   RssRefreshResult,
+  RssSeriesBadge,
 } from "../types/rss";
 
 export function getRssDownloadRoot(): Promise<RssDownloadRoot> {
   return invoke<RssDownloadRoot>("rss_download_root");
+}
+
+export function listRssSeriesBadges(
+  libraryId: number,
+): Promise<RssSeriesBadge[]> {
+  return invoke<RssSeriesBadge[]>("rss_series_badges", { libraryId });
 }
 
 export function parseReleaseTitle(text: string): Promise<ParsedReleaseTitle> {

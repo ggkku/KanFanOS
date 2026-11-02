@@ -235,6 +235,12 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 收藏夹菜单/管理弹窗打开时隐藏原生 webview，浏览器区域显示地球图标的空白背景；管理弹窗不再加黑色遮罩。
 - 浏览器点击 `.torrent` 链接改走应用侧 `fetch_torrent`（系统代理）再以 multipart 文件传给 qBittorrent，和 RSS 下载一致；磁力链接仍直接给 qBittorrent。
 - 浏览器添加种子的结果、qBittorrent 错误、收藏提示统一使用右下角 toast，不再在右侧任务卡片里插入提示文字。
+- 内置 qBittorrent 在应用初始化完成后直接 `ensure_started`，不再依赖资源页的 `qb_status` 触发；外部模式跳过。
+- 选番页的追番标记由 `rss_series_badges` 计算：只遍历 `status = active` 的追番，按追番保存目录（或当前「下载到」）递归找视频文件，并排除已有 `watch_history` 记录的文件；结果按关联番剧聚合，封面显示「新 N」。目录和媒体库的归属优先使用 `series_id`，其次保存目录与番剧 path 的包含关系，最后按番剧名/别名匹配。前端在档期页每 30 秒刷新一次。
+- 同名番剧检测由 `series_name_conflicts` 提供，按 `LOWER(TRIM(name))` 分组；前端在档期页和搜索结果里给每个同名封面显示「同名 N」警告，避免把追番标记或清空记录操作落到另一个同名目录。
+- 字幕选择保存到 `localStorage` 的 `kanfanos.player.subtitle`，记录 `off`、标题、语言和当时的 track id；新一集等待字幕列表和播放进度就绪后，按标题+语言、标题、id、唯一语言依次匹配并重发 `sid`，关闭字幕后也会在新一集保持关闭。
+- 番剧封面支持右键菜单「在文件夹中显示」，通过 `@tauri-apps/plugin-opener` 的 `revealItemInDir` 在资源管理器里定位目录；只使用 `opener:default` 已有的权限。
+- 播放器全屏自动连播切集时会先把控制栏收起，并在新 mpv 启动后的 2.5 秒内屏蔽鼠标唤出，避免下一集启动时控制栏闪出。录制音频输出设备到 `localStorage` 的 `kanfanos.player.audioDevice`，每次新 mpv 的设备列表就绪且播放进度开始推进后自动重发 `audio-device`（避免在启动精确 seek 阶段切设备导致 mpv 卡住）；选择「自动」则不重发。保存的设备不在 `audio-device-list` 时发送 `auto` 并显示提示，保留偏好；设备重新出现后自动切回。另加播放位置兜底：未暂停但 `time-pos` 连续 4 秒不前进时，向后 seek 750ms，最多两次，用于恢复 mpv 启动 seek 卡死。
 
 ## 1.2.2 细节
 

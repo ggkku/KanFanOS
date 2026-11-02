@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { Film, Loader2, RefreshCw } from "lucide-react";
 import { EmptyState } from "../../components/common/EmptyState";
 import { SelectMenu } from "../../components/common/SelectMenu";
@@ -19,8 +20,14 @@ interface CategoryPageProps {
   loadingMore: boolean;
   scanning: boolean;
   sort: SeriesSort;
+  badges: Record<number, number>;
+  duplicateNames: Record<string, number>;
   onSortChange: (sort: SeriesSort) => void;
   onOpenSeries: (series: SeriesSummary, coverRect: DOMRect | null) => void;
+  onSeriesContextMenu: (
+    series: SeriesSummary,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => void;
   onRescan: () => void;
   onLoadMore: () => void;
 }
@@ -33,8 +40,11 @@ export function CategoryPage({
   loadingMore,
   scanning,
   sort,
+  badges,
+  duplicateNames,
   onSortChange,
   onOpenSeries,
+  onSeriesContextMenu,
   onRescan,
   onLoadMore,
 }: CategoryPageProps) {
@@ -85,6 +95,11 @@ export function CategoryPage({
                 key={item.id}
                 series={item}
                 coverUrl={seriesCoverUrl(item)}
+                unwatchedCount={badges[item.id] ?? 0}
+                duplicateCount={
+                  duplicateNames[item.name.trim().toLowerCase()] ?? 0
+                }
+                onContextMenu={(event) => onSeriesContextMenu(item, event)}
                 onOpen={(rect) => onOpenSeries(item, rect)}
               />
             ))}

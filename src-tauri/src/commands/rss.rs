@@ -2,6 +2,8 @@
 
 use std::{
     cmp::Reverse,
+    collections::{HashMap, HashSet},
+    fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
@@ -38,6 +40,13 @@ pub struct RssDownloadRoot {
     pub exists: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RssSeriesBadge {
+    pub series_id: i64,
+    pub unwatched_count: i64,
+}
+
 #[tauri::command]
 pub fn rss_download_root(app: AppHandle) -> Result<RssDownloadRoot, String> {
     let path = download_base_dir(&app).map_err(to_message)?;
@@ -46,6 +55,242 @@ pub fn rss_download_root(app: AppHandle) -> Result<RssDownloadRoot, String> {
         path: path.to_string_lossy().into_owned(),
         exists,
     })
+}
+
+#[tauri::command]
+pub async fn rss_series_badges(
+    app: AppHandle,
+    library_id: i64,
+) -> Result<Vec<RssSeriesBadge>, String> {
+    tauri::async_runtime::spawn_blocking(move || compute_rss_series_badges(&app, library_id))
+        .await
+        .map_err(|error| format!("统计未看视频失败：{error}"))?
+}
+
+fn compute_rss_series_badges(
+    app: &AppHandle,
+    library_id: i64,
+) -> Result<Vec<RssSeriesBadge>, String> {
+    let state = app.state::<AppState>();
+    let follows = state.db.list_rss_follows().map_err(to_message)?;
+    let targets = state
+        .db
+        .series_badge_targets(library_id)
+        .map_err(to_message)?;
+    let watched = state.db.watched_video_paths().map_err(to_message)?;
+    let watched: HashSet<String> = watched
+        .iter()
+        .map(|path| normalize_badge_path(Path::new(path)))
+        .collect();
+    let fallback_root = download_base_dir(app).ok();
+
+    let mut unwatched_files: HashMap<i64, HashSet<String>> = HashMap::new();
+    let mut scan_cache: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for follow in follows.iter().filter(|follow| follow.status == "active") {
+        let directory = follow
+            .save_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| fallback_root.clone());
+        let Some(directory) = directory else {
+            continue;
+        };
+        if !directory.is_dir() {
+            continue;
+        }
+        let Some(target) = resolve_badge_target(follow, &targets, &directory) else {
+            continue;
+        };
+        let key = normalize_badge_path(&target.scan_root);
+        let files = scan_cache
+            .entry(key)
+            .or_insert_with(|| collect_video_files(&target.scan_root));
+        for file in files
+            .iter()
+            .filter(|file| !watched.contains(&normalize_badge_path(file)))
+            .filter(|file| target.matches(file))
+        {
+            unwatched_files
+                .entry(target.series_id)
+                .or_default()
+                .insert(normalize_badge_path(file));
+        }
+    }
+
+    let mut badges: Vec<_> = unwatched_files
+        .into_iter()
+        .map(|(series_id, files)| RssSeriesBadge {
+            series_id,
+            unwatched_count: files.len() as i64,
+        })
+        .collect();
+    badges.sort_by_key(|badge| badge.series_id);
+    Ok(badges)
+}
+
+struct BadgeTarget {
+    series_id: i64,
+    scan_root: PathBuf,
+    filter: Vec<String>,
+}
+
+impl BadgeTarget {
+    fn matches(&self, file: &Path) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        let name = normalize_badge_name(&file.to_string_lossy());
+        self.filter.iter().any(|expected| name.contains(expected))
+    }
+}
+
+fn resolve_badge_target(
+    follow: &RssFollow,
+    targets: &[(i64, String, String)],
+    directory: &Path,
+) -> Option<BadgeTarget> {
+    let directory_key = normalize_badge_path(directory);
+    if let Some(series_id) = follow.series_id
+        && let Some((id, path, _)) = targets.iter().find(|(id, _, _)| *id == series_id)
+    {
+        let series_path = PathBuf::from(path);
+        let series_key = normalize_badge_path(&series_path);
+        let scan_root = if path_is_under(&directory_key, &series_key) {
+            directory.to_path_buf()
+        } else if path_is_under(&series_key, &directory_key) {
+            series_path
+        } else {
+            directory.to_path_buf()
+        };
+        return Some(BadgeTarget {
+            series_id: *id,
+            scan_root,
+            filter: Vec::new(),
+        });
+    }
+
+    let mut best: Option<&(i64, String, String)> = None;
+    let mut best_len = 0;
+    for target in targets {
+        let series_key = normalize_badge_path(Path::new(&target.1));
+        if path_is_under(&directory_key, &series_key) && series_key.len() > best_len {
+            best = Some(target);
+            best_len = series_key.len();
+        }
+    }
+    if let Some((id, _path, _)) = best {
+        return Some(BadgeTarget {
+            series_id: *id,
+            scan_root: directory.to_path_buf(),
+            filter: Vec::new(),
+        });
+    }
+
+    let mut names: Vec<String> = Vec::new();
+    names.push(normalize_badge_name(&follow.title));
+    names.extend(follow.aliases.iter().map(|alias| normalize_badge_name(alias)));
+    names.push(normalize_badge_name(
+        directory.file_name()?.to_string_lossy().as_ref(),
+    ));
+    names.retain(|name| !name.is_empty());
+
+    for (id, path, name) in targets {
+        let series_name = normalize_badge_name(name);
+        if names.iter().any(|candidate| candidate == &series_name) {
+            let series_path = PathBuf::from(path);
+            let series_key = normalize_badge_path(&series_path);
+            let scan_root = if path_is_under(&series_key, &directory_key) {
+                series_path
+            } else {
+                directory.to_path_buf()
+            };
+            let filter = if path_is_under(&series_key, &directory_key) {
+                Vec::new()
+            } else {
+                names.clone()
+            };
+            return Some(BadgeTarget {
+                series_id: *id,
+                scan_root,
+                filter,
+            });
+        }
+    }
+    None
+}
+
+fn collect_video_files(root: &Path) -> Vec<PathBuf> {
+    const EXTENSIONS: &[&str] = &[
+        "mkv", "mp4", "avi", "ts", "m4v", "webm", "mov", "flv", "wmv",
+    ];
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(directory) = stack.pop() {
+        if visited >= 5000 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited >= 5000 {
+                break;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with('.')
+                {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if EXTENSIONS.contains(&extension.as_str()) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+fn normalize_badge_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn path_is_under(child: &str, parent: &str) -> bool {
+    child == parent
+        || (!parent.is_empty()
+            && child
+                .strip_prefix(parent)
+                .is_some_and(|rest| rest.starts_with('\\')))
+}
+
+fn normalize_badge_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[tauri::command]

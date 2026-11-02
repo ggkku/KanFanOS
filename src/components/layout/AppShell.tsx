@@ -41,7 +41,10 @@ export function AppShell({
         onQueryChange={onQueryChange}
         onNavigate={onNavigate}
       />
-      <main ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden">
+      <main
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]"
+      >
         <div
           className={
             wide
