@@ -5,13 +5,19 @@ pub mod surface;
 mod subtitles;
 
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    collections::HashMap,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -106,6 +112,84 @@ pub struct PlayerSession {
     pub tx: UnboundedSender<String>,
     pub child: std::process::Child,
     pub surface: isize,
+}
+
+/// 创建一个隐藏的置顶预览窗口，供进度条悬停画面使用。
+/// 它是独立顶层窗口，可以覆盖在原生视频窗口上方。
+pub fn ensure_preview_window(app: &AppHandle) -> Result<()> {
+    if app.get_webview_window("player-preview").is_some() {
+        return Ok(());
+    }
+    let window = WebviewWindowBuilder::new(
+        app,
+        "player-preview",
+        WebviewUrl::App("player-preview.html".into()),
+    )
+    .title("")
+    .inner_size(160.0, 112.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .shadow(false)
+    .build()
+    .context("创建播放器预览窗口失败")?;
+    window.set_ignore_cursor_events(true)?;
+    Ok(())
+}
+
+fn preview_position(
+    app: &AppHandle,
+    client_x: f64,
+    client_y: f64,
+) -> Result<tauri::LogicalPosition<f64>> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| anyhow!("找不到主窗口"))?;
+    let position = main.inner_position()?;
+    let scale = main.scale_factor()?;
+    Ok(tauri::LogicalPosition::new(
+        (position.x as f64 / scale + client_x).max(0.0),
+        (position.y as f64 / scale + client_y).max(0.0),
+    ))
+}
+
+pub fn show_preview(
+    app: &AppHandle,
+    image: &str,
+    client_x: f64,
+    client_y: f64,
+) -> Result<()> {
+    let window = app
+        .get_webview_window("player-preview")
+        .ok_or_else(|| anyhow!("预览窗口不可用"))?;
+    let js = format!(
+        "window.setPreview({})",
+        serde_json::to_string(image)?,
+    );
+    window.eval(js)?;
+    window.set_position(preview_position(app, client_x, client_y)?)?;
+    window.show()?;
+    Ok(())
+}
+
+pub fn move_preview(app: &AppHandle, client_x: f64, client_y: f64) -> Result<()> {
+    let window = app
+        .get_webview_window("player-preview")
+        .ok_or_else(|| anyhow!("预览窗口不可用"))?;
+    window.set_position(preview_position(app, client_x, client_y)?)?;
+    window.show()?;
+    Ok(())
+}
+
+pub fn hide_preview(app: &AppHandle) -> Result<()> {
+    if let Some(window) = app.get_webview_window("player-preview") {
+        window.hide()?;
+    }
+    Ok(())
 }
 
 /// 启动播放。已有会话会先停止。
@@ -219,6 +303,78 @@ pub fn set_cursor_visible(app: &AppHandle, visible: bool) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+static PREVIEW_CACHE: OnceLock<Mutex<HashMap<(i64, i64), String>>> = OnceLock::new();
+
+/// 为进度条悬停预览抓取指定时间点的一帧，返回可直接放进 img src 的 data URL。
+pub async fn preview_frame(
+    app: &AppHandle,
+    episode_id: i64,
+    position_ms: i64,
+) -> Result<String> {
+    let state = app.state::<AppState>();
+    let episode = state.db.playable_episode(episode_id)?;
+    if !Path::new(&episode.path).is_file() {
+        bail!("视频文件不存在：{}", episode.path);
+    }
+
+    let bucket = position_ms.max(0) / 5000 * 5000;
+    if let Some(cached) = PREVIEW_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&(episode_id, bucket)).cloned())
+    {
+        return Ok(cached);
+    }
+
+    let seek_seconds = bucket as f64 / 1000.0;
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        crate::media::command("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-ss",
+                &format!("{seek_seconds:.3}"),
+                "-i",
+                &episode.path,
+                "-frames:v",
+                "1",
+                "-an",
+                "-sn",
+                "-vf",
+                "scale=320:-2",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ])
+            .output(),
+    )
+    .await
+    .context("生成预览图超时")??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("生成预览图失败：{}", stderr.trim());
+    }
+    if output.stdout.is_empty() {
+        bail!("生成预览图失败：没有输出");
+    }
+    let image = format!(
+        "data:image/jpeg;base64,{}",
+        BASE64.encode(&output.stdout)
+    );
+    if let Ok(mut cache) = PREVIEW_CACHE.get_or_init(Default::default).lock() {
+        if cache.len() >= 100 {
+            cache.clear();
+        }
+        cache.insert((episode_id, bucket), image.clone());
+    }
+    Ok(image)
 }
 
 pub fn send(app: &AppHandle, command: serde_json::Value) -> Result<()> {
@@ -720,9 +876,21 @@ fn parse_audio_tracks(data: &serde_json::Value) -> Vec<AudioTrack> {
         .collect()
 }
 
+fn completed_at_end(position_ms: i64, duration_ms: i64, ended: bool) -> bool {
+    if ended && position_ms > 0 {
+        return true;
+    }
+    if duration_ms <= 0 {
+        return false;
+    }
+    let position_ms = position_ms.clamp(0, duration_ms);
+    let remaining_ms = duration_ms - position_ms;
+    // 只有进入最后 15 秒且至少到 98% 才自动标记完成。
+    remaining_ms <= 15_000 && position_ms * 100 >= duration_ms * 98
+}
+
 fn save_progress(app: &AppHandle, episode_id: i64, state: &PlayerState) {
-    let completed = state.duration_ms > 0
-        && state.position_ms >= state.duration_ms * 9 / 10;
+    let completed = completed_at_end(state.position_ms, state.duration_ms, state.ended);
 
     let db = &app.state::<AppState>().db;
     if let Err(error) = db.save_watch_position(
@@ -757,7 +925,9 @@ fn cleanup(app: &AppHandle, episode_id: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_audio_devices, parse_audio_tracks, parse_subtitle_tracks};
+    use super::{
+        completed_at_end, parse_audio_devices, parse_audio_tracks, parse_subtitle_tracks,
+    };
 
     #[test]
     fn parses_subtitle_tracks_only() {
@@ -810,6 +980,19 @@ mod tests {
         assert_eq!(devices[0].name, "auto");
         assert_eq!(devices[1].description, "扬声器 (Realtek)");
         assert_eq!(devices[2].description, "wasapi/{headphone}");
+    }
+
+    #[test]
+    fn completion_requires_near_the_end() {
+        assert!(!completed_at_end(900_000, 1_000_000, false));
+        assert!(!completed_at_end(950_000, 1_000_000, false));
+        assert!(!completed_at_end(980_000, 1_000_000, false));
+        assert!(!completed_at_end(984_999, 1_000_000, false));
+        assert!(completed_at_end(985_000, 1_000_000, false));
+        assert!(completed_at_end(999_000, 1_000_000, false));
+        assert!(completed_at_end(999_000, 1_000_000, true));
+        assert!(!completed_at_end(0, 1_000_000, true));
+        assert!(!completed_at_end(1_000, 0, false));
     }
 
     #[test]

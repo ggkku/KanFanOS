@@ -47,6 +47,10 @@ pub fn spawn_embedded(
         .arg("--osc=no")
         .arg("--osd-level=0")
         .arg("--keep-open=yes")
+        // 音量由 Windows 系统主音量控制，mpv 始终保持 100%，避免换集时先以
+        // 默认音量出声再跳到应用音量。
+        .arg("--volume=100")
+        .arg("--mute=no")
         .arg("--force-window=yes")
         // 软件解码。部分老显卡驱动上 D3D11 硬件解码会出现音画不同步和卡顿，
         // 而 1080p H.264 的软件解码开销很低。

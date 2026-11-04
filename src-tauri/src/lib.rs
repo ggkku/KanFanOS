@@ -13,6 +13,7 @@ mod scanner;
 mod series_config;
 mod settings;
 mod state;
+mod system_volume;
 mod time;
 mod tools;
 mod watcher;
@@ -183,6 +184,11 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
     // 内置 qBittorrent 跟随应用启动，资源页只负责连接和展示。
     commands::resources::spawn_qbittorrent_at_startup(app.handle().clone());
 
+    // 进度条悬停预览用的透明置顶窗口，隐藏创建，播放器按需显示。
+    if let Err(error) = playback::ensure_preview_window(app.handle()) {
+        eprintln!("创建播放器预览窗口失败: {error:#}");
+    }
+
     Ok(())
 }
 
@@ -202,6 +208,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::library::get_library_stats,
             commands::library::series_name_conflicts,
+            commands::library::list_invalid_series,
+            commands::library::cleanup_invalid_series,
             commands::library::scan_library,
             commands::library::cancel_scan,
             commands::settings::get_settings,
@@ -248,6 +256,13 @@ pub fn run() {
             commands::playback::player_set_sub_delay,
             commands::playback::player_set_audio,
             commands::playback::player_set_audio_device,
+            commands::playback::player_preview_frame,
+            commands::playback::get_system_volume,
+            commands::playback::set_system_volume,
+            commands::playback::set_system_muted,
+            commands::playback::show_player_preview,
+            commands::playback::move_player_preview,
+            commands::playback::hide_player_preview,
             commands::playback::set_player_cursor_visible,
             commands::playback::list_recent,
             commands::rss::rss_list_feeds,

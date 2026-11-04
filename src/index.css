@@ -345,3 +345,9 @@ textarea,
 }
 
 .kf-toast-out { animation: kf-toast-out 180ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+
+/* 播放器控制栏：鼠标点击后不显示浏览器默认聚焦框。 */
+.player-controls :is(button, select, input):focus {
+  outline: none;
+}

@@ -7,6 +7,8 @@ import type {
   CacheStats,
   CategorySummary,
   ConfigRepairSummary,
+  InvalidSeries,
+  InvalidSeriesCleanup,
   EpisodeSummary,
   LibraryStats,
   LibrarySummary,
@@ -118,6 +120,18 @@ export function getSeriesNameConflicts(
   libraryId: number,
 ): Promise<SeriesNameConflict[]> {
   return invoke<SeriesNameConflict[]>("series_name_conflicts", { libraryId });
+}
+
+export function listInvalidSeries(
+  libraryId: number,
+): Promise<InvalidSeries[]> {
+  return invoke<InvalidSeries[]>("list_invalid_series", { libraryId });
+}
+
+export function cleanupInvalidSeries(
+  libraryId: number,
+): Promise<InvalidSeriesCleanup> {
+  return invoke<InvalidSeriesCleanup>("cleanup_invalid_series", { libraryId });
 }
 
 export function searchSeries(
@@ -323,6 +337,49 @@ export function playerSetAudio(audioId: number): Promise<void> {
 
 export function playerSetAudioDevice(device: string): Promise<void> {
   return invoke<void>("player_set_audio_device", { device });
+}
+
+export interface SystemVolume {
+  level: number;
+  muted: boolean;
+}
+
+export function getSystemVolume(): Promise<SystemVolume> {
+  return invoke<SystemVolume>("get_system_volume");
+}
+
+export function setSystemVolume(level: number): Promise<void> {
+  return invoke<void>("set_system_volume", { level });
+}
+
+export function setSystemMuted(muted: boolean): Promise<void> {
+  return invoke<void>("set_system_muted", { muted });
+}
+
+export function playerPreviewFrame(
+  episodeId: number,
+  positionMs: number,
+): Promise<string> {
+  return invoke<string>("player_preview_frame", { episodeId, positionMs });
+}
+
+export function showPlayerPreview(
+  image: string,
+  clientX: number,
+  clientY: number,
+): Promise<void> {
+  return invoke<void>("show_player_preview", { image, clientX, clientY });
+}
+
+export function movePlayerPreview(
+  clientX: number,
+  clientY: number,
+): Promise<void> {
+  return invoke<void>("move_player_preview", { clientX, clientY });
+}
+
+export function hidePlayerPreview(): Promise<void> {
+  return invoke<void>("hide_player_preview");
 }
 
 export function setPlayerCursorVisible(visible: boolean): Promise<void> {

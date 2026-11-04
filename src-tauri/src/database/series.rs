@@ -292,9 +292,13 @@ impl Database {
     pub fn series_badge_targets(&self, library_id: i64) -> Result<Vec<(i64, String, String)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, path, name FROM series
-              WHERE library_id = ?1
-              ORDER BY id",
+            "SELECT s.id, s.path, s.name FROM series s
+              WHERE s.library_id = ?1
+                AND EXISTS (
+                    SELECT 1 FROM videos v
+                     WHERE v.series_id = s.id AND v.status <> 'missing'
+                )
+              ORDER BY s.id",
         )?;
         let rows = stmt.query_map([library_id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -303,12 +307,57 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn series_without_active_videos(
+        &self,
+        library_id: i64,
+    ) -> Result<Vec<(i64, String, String, i64)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.name, s.path,
+                    (SELECT COUNT(*) FROM videos v WHERE v.series_id = s.id) AS video_count
+               FROM series s
+              WHERE s.library_id = ?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM videos v
+                     WHERE v.series_id = s.id AND v.status <> 'missing'
+                )
+              ORDER BY s.name COLLATE NOCASE, s.id",
+        )?;
+        let rows = stmt.query_map([library_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn delete_series_batch(&self, ids: &[i64]) -> Result<(usize, usize)> {
+        if ids.is_empty() {
+            return Ok((0, 0));
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let mut removed_videos = 0i64;
+        for id in ids {
+            removed_videos += tx.query_row(
+                "SELECT COUNT(*) FROM videos WHERE series_id = ?1",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            tx.execute("DELETE FROM series WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok((ids.len(), removed_videos as usize))
+    }
     pub fn series_name_conflicts(&self, library_id: i64) -> Result<Vec<(String, i64)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT LOWER(TRIM(name)) AS normalized_name, COUNT(*) AS count
-               FROM series
-              WHERE library_id = ?1
+            "SELECT LOWER(TRIM(s.name)) AS normalized_name, COUNT(*) AS count
+               FROM series s
+              WHERE s.library_id = ?1
+                AND EXISTS (
+                    SELECT 1 FROM videos v
+                     WHERE v.series_id = s.id AND v.status <> 'missing'
+                )
               GROUP BY normalized_name
              HAVING COUNT(*) > 1
               ORDER BY normalized_name",
@@ -915,6 +964,92 @@ mod tests {
         // LIKE 通配符必须被转义。
         let wildcard = db.search_series(library.id, "%", 10, 0).unwrap();
         assert_eq!(wildcard.total, 0);
+
+        drop(db);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplicate_names_ignore_series_without_active_videos() {
+        let (db, dir) = temp_db("series-duplicate-name");
+        let library = db.add_library("X:\\library", "library", now_ms()).unwrap();
+        let name = "移动测试番";
+
+        let old_id = db
+            .upsert_series(
+                library.id,
+                "未知时间",
+                name,
+                "X:\\library\\old\\移动测试番",
+                "",
+                None,
+                None,
+                now_ms(),
+            )
+            .unwrap();
+        let new_id = db
+            .upsert_series(
+                library.id,
+                "剧场版",
+                name,
+                "X:\\library\\剧场版\\移动测试番",
+                "",
+                None,
+                None,
+                now_ms(),
+            )
+            .unwrap();
+
+        let new_file = ScannedFile {
+            series_id: new_id,
+            path: "X:\\library\\剧场版\\移动测试番\\第1集.mp4".to_string(),
+            filename: "第1集.mp4".to_string(),
+            extension: "mp4".to_string(),
+            file_size: 1,
+            modified_at: Some(1),
+            kind: "main".to_string(),
+        };
+        db.upsert_videos(library.id, &[new_file], now_ms())
+            .unwrap();
+
+        // 旧目录只剩一条没有活动视频的 series 记录，不应算作同名番剧。
+        assert!(db.series_name_conflicts(library.id).unwrap().is_empty());
+
+        let old_file = ScannedFile {
+            series_id: old_id,
+            path: "X:\\library\\old\\移动测试番\\第1集.mp4".to_string(),
+            filename: "第1集.mp4".to_string(),
+            extension: "mp4".to_string(),
+            file_size: 1,
+            modified_at: Some(1),
+            kind: "main".to_string(),
+        };
+        db.upsert_videos(library.id, &[old_file], now_ms())
+            .unwrap();
+        assert_eq!(
+            db.series_name_conflicts(library.id).unwrap(),
+            vec![("移动测试番".to_string(), 2)]
+        );
+
+        drop(db);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleting_series_batch_cascades_videos() {
+        let (db, dir) = temp_db("series-cleanup");
+        let library = db.add_library(r"X:\library", "library", now_ms()).unwrap();
+        let series_id = add_series_with_episodes(
+            &db,
+            library.id,
+            "未知时间",
+            "失效测试番",
+            &["第1集.mp4", "第2集.mp4"],
+        );
+
+        assert_eq!(db.video_row_count(library.id).unwrap(), 2);
+        assert_eq!(db.delete_series_batch(&[series_id]).unwrap(), (1, 2));
+        assert_eq!(db.video_row_count(library.id).unwrap(), 0);
 
         drop(db);
         let _ = fs::remove_dir_all(dir);

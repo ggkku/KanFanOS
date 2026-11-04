@@ -159,6 +159,64 @@ pub fn player_set_audio(
 }
 
 /// 切换播放器的音频输出设备。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemVolume {
+    level: u32,
+    muted: bool,
+}
+
+#[tauri::command]
+pub fn get_system_volume() -> Result<SystemVolume, String> {
+    let (level, muted) = crate::system_volume::get().map_err(to_message)?;
+    Ok(SystemVolume { level, muted })
+}
+
+#[tauri::command]
+pub fn set_system_volume(level: u32) -> Result<(), String> {
+    crate::system_volume::set_level(level).map_err(to_message)
+}
+
+#[tauri::command]
+pub fn set_system_muted(muted: bool) -> Result<(), String> {
+    crate::system_volume::set_muted(muted).map_err(to_message)
+}
+
+#[tauri::command]
+pub fn show_player_preview(
+    app: AppHandle,
+    image: String,
+    client_x: f64,
+    client_y: f64,
+) -> Result<(), String> {
+    playback::show_preview(&app, &image, client_x, client_y).map_err(to_message)
+}
+
+#[tauri::command]
+pub fn move_player_preview(
+    app: AppHandle,
+    client_x: f64,
+    client_y: f64,
+) -> Result<(), String> {
+    playback::move_preview(&app, client_x, client_y).map_err(to_message)
+}
+
+#[tauri::command]
+pub fn hide_player_preview(app: AppHandle) -> Result<(), String> {
+    playback::hide_preview(&app).map_err(to_message)
+}
+
+#[tauri::command(async)]
+pub async fn player_preview_frame(
+    app: AppHandle,
+    episode_id: i64,
+    position_ms: i64,
+) -> Result<String, String> {
+    playback::preview_frame(&app, episode_id, position_ms)
+        .await
+        .map_err(to_message)
+}
+
 #[tauri::command]
 pub fn player_set_audio_device(
     app: AppHandle,

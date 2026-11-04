@@ -85,6 +85,18 @@ export interface SeriesNameConflict {
   count: number;
 }
 
+export interface InvalidSeries {
+  seriesId: number;
+  name: string;
+  path: string;
+  missingVideos: number;
+}
+
+export interface InvalidSeriesCleanup {
+  removedSeries: number;
+  removedVideos: number;
+}
+
 export interface SearchItem extends SeriesSummary {
   matchedEpisodes: number;
   matchPreview: string | null;

@@ -17,4 +17,6 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/011_rss_preferred_groups.sql"),
     include_str!("../../migrations/012_rss_subtitle_packaging.sql"),
     include_str!("../../migrations/013_rss_auto_downloaded.sql"),
+    include_str!("../../migrations/014_fix_watch_completion.sql"),
+    include_str!("../../migrations/015_fix_watch_completion_98.sql"),
 ];

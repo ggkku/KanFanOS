@@ -238,6 +238,11 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 内置 qBittorrent 在应用初始化完成后直接 `ensure_started`，不再依赖资源页的 `qb_status` 触发；外部模式跳过。
 - 选番页的追番标记由 `rss_series_badges` 计算：只遍历 `status = active` 的追番，按追番保存目录（或当前「下载到」）递归找视频文件，并排除已有 `watch_history` 记录的文件；结果按关联番剧聚合，封面显示「新 N」。目录和媒体库的归属优先使用 `series_id`，其次保存目录与番剧 path 的包含关系，最后按番剧名/别名匹配。前端在档期页每 30 秒刷新一次。
 - 同名番剧检测由 `series_name_conflicts` 提供，按 `LOWER(TRIM(name))` 分组；前端在档期页和搜索结果里给每个同名封面显示「同名 N」警告，避免把追番标记或清空记录操作落到另一个同名目录。
+- 音量/静音不再写 mpv 的 volume/mute，而是通过 Core Audio `IAudioEndpointVolume` 控制 Windows 默认播放设备的主音量/静音；mpv 启动参数固定 `--volume=100 --mute=no`，避免换集时先以 100% 出声。播放器打开期间每 1.5 秒轮询系统音量，滑块拖动时 40ms 合并写入。
+- 播放器控制栏偏好写入 `localStorage`：倍速/音轨/字幕/字幕延迟/音频设备/自动连播；新一集在播放进度推进后应用，音轨和字幕按标题+语言匹配，找不到就用 mpv 默认。进度条预览通过 `player_preview_frame` 调 FFmpeg 抽取 320px JPEG data URL；前端按 5 秒分桶、220ms 防抖并缓存，后端也有 100 帧内存缓存。预览显示在隐藏创建的置顶透明 `player-preview` 窗口中，窗口只显示图像，位于进度条上方并忽略鼠标事件，因此可以覆盖在原生视频窗口上方；悬停时间不放在预览窗口里，而是用进度条上方预留空间里的 HTML 徽标随鼠标位置实时更新，抓帧未完成时也能显示时间。窗口模式点击画面不再隐藏控制栏；控制栏使用 `.player-controls` 去除鼠标聚焦 outline。
+- 播放进度完成判定从 `position >= duration * 90%` 改为 `ended` 或「剩余不超过 15 秒且进度 >= 98%」；`014_fix_watch_completion.sql` 修正 90% 误标，`015_fix_watch_completion_98.sql` 按新阈值再次校正历史记录。
+- 设置页「失效番剧」：`list_invalid_series` 只返回没有有效视频且 series 目录已不存在的记录，并先校验媒体库根目录存在，避免整盘离线时批量误删；`cleanup_invalid_series` 重新计算候选并批量删除 series，视频和观看记录按外键级联删除。
+- 1.3.3 修复移动番剧目录后的同名误报：scanner 只会把旧视频标为 missing，不会删除旧 series 行；series_name_conflicts 与 series_badge_targets 现在都要求 series 至少有一个 status <> 'missing' 的视频，和选番页的可见条件一致。
 - 字幕选择保存到 `localStorage` 的 `kanfanos.player.subtitle`，记录 `off`、标题、语言和当时的 track id；新一集等待字幕列表和播放进度就绪后，按标题+语言、标题、id、唯一语言依次匹配并重发 `sid`，关闭字幕后也会在新一集保持关闭。
 - 番剧封面支持右键菜单「在文件夹中显示」，通过 `@tauri-apps/plugin-opener` 的 `revealItemInDir` 在资源管理器里定位目录；只使用 `opener:default` 已有的权限。
 - 播放器全屏自动连播切集时会先把控制栏收起，并在新 mpv 启动后的 2.5 秒内屏蔽鼠标唤出，避免下一集启动时控制栏闪出。录制音频输出设备到 `localStorage` 的 `kanfanos.player.audioDevice`，每次新 mpv 的设备列表就绪且播放进度开始推进后自动重发 `audio-device`（避免在启动精确 seek 阶段切设备导致 mpv 卡住）；选择「自动」则不重发。保存的设备不在 `audio-device-list` 时发送 `auto` 并显示提示，保留偏好；设备重新出现后自动切回。另加播放位置兜底：未暂停但 `time-pos` 连续 4 秒不前进时，向后 seek 750ms，最多两次，用于恢复 mpv 启动 seek 卡死。

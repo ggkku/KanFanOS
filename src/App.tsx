@@ -1179,6 +1179,14 @@ function App() {
         onRescan={rescan}
         onSettingsChange={setSettings}
         onCacheCleared={() => setRefreshKey((value) => value + 1)}
+        onLibraryChanged={() => {
+          setRefreshKey((value) => value + 1);
+          if (settings?.libraryId != null) {
+            void listCategories(settings.libraryId)
+              .then(setCategories)
+              .catch(() => {});
+          }
+        }}
       />
     );
   } else if (view.kind === "recent") {

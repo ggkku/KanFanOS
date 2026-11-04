@@ -5,6 +5,8 @@ import {
   useRef,
   useState,
 } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   AudioLines,
   Captions,
@@ -24,22 +26,27 @@ import {
 } from "lucide-react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
+  getSystemVolume,
+  hidePlayerPreview,
+  movePlayerPreview,
   onPlayerClosed,
   onPlayerClick,
   onPlayerError,
   onPlayerMouseActivity,
   onPlayerState,
+  playerPreviewFrame,
   playerSeek,
   playerSetAudio,
   playerSetAudioDevice,
-  playerSetMuted,
   playerSetPaused,
   playerSetSpeed,
   playerSetSubDelay,
   playerSetSubtitle,
-  playerSetVolume,
   resizePlayer,
   setPlayerCursorVisible,
+  setSystemMuted,
+  setSystemVolume,
+  showPlayerPreview,
   startPlayer,
   stopPlayer,
 } from "../../api/library";
@@ -83,7 +90,11 @@ const CONTROLS_HIDE_DURATION_MS = 300;
 /** 自动连播是应用级偏好，不随番剧/集数重置。 */
 const AUTO_PLAY_NEXT_STORAGE_KEY = "kanfanos.player.autoPlayNext";
 const AUDIO_DEVICE_STORAGE_KEY = "kanfanos.player.audioDevice";
+const AUDIO_TRACK_STORAGE_KEY = "kanfanos.player.audioTrack";
 const SUBTITLE_PREFERENCE_STORAGE_KEY = "kanfanos.player.subtitle";
+const SPEED_STORAGE_KEY = "kanfanos.player.speed";
+const SUBTITLE_DELAY_STORAGE_KEY = "kanfanos.player.subtitleDelay";
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 function readAutoPlayNextPreference(): boolean {
   try {
@@ -107,6 +118,67 @@ function readAudioDevicePreference(): string | null {
 }
 
 let audioDevicePreference = readAudioDevicePreference();
+
+function readStoredNumber(
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw == null) return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, value));
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStoredValue(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // localStorage 不可用时只保留本次运行内的偏好。
+  }
+}
+
+let speedPreference = readStoredNumber(SPEED_STORAGE_KEY, 1, 0.5, 2);
+if (!SPEED_OPTIONS.includes(speedPreference)) speedPreference = 1;
+let subtitleDelayPreference = readStoredNumber(
+  SUBTITLE_DELAY_STORAGE_KEY,
+  0,
+  -60_000,
+  60_000,
+);
+
+interface AudioTrackPreference {
+  id: number;
+  title: string;
+  lang: string;
+}
+
+function readAudioTrackPreference(): AudioTrackPreference | null {
+  try {
+    const raw = window.localStorage.getItem(AUDIO_TRACK_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<AudioTrackPreference>;
+    return {
+      id: typeof parsed.id === "number" ? parsed.id : 0,
+      title: typeof parsed.title === "string" ? parsed.title : "",
+      lang: typeof parsed.lang === "string" ? parsed.lang : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveAudioTrackPreference(preference: AudioTrackPreference) {
+  saveStoredValue(AUDIO_TRACK_STORAGE_KEY, JSON.stringify(preference));
+}
+
+let audioTrackPreference = readAudioTrackPreference();
 
 interface SubtitlePreference {
   off: boolean;
@@ -153,6 +225,37 @@ function findSubtitleTrack(
   tracks: SubtitleTrack[],
   preference: SubtitlePreference,
 ): SubtitleTrack | null {
+  const title = subtitleMatchKey(preference.title);
+  const lang = subtitleMatchKey(preference.lang);
+  if (title || lang) {
+    const exact = tracks.find(
+      (track) =>
+        subtitleMatchKey(track.title) === title &&
+        subtitleMatchKey(track.lang) === lang,
+    );
+    if (exact) return exact;
+  }
+  if (title) {
+    const byTitle = tracks.find(
+      (track) => subtitleMatchKey(track.title) === title,
+    );
+    if (byTitle) return byTitle;
+  }
+  const byId = tracks.find((track) => track.id === preference.id);
+  if (byId) return byId;
+  if (lang) {
+    const byLang = tracks.filter(
+      (track) => subtitleMatchKey(track.lang) === lang,
+    );
+    if (byLang.length === 1) return byLang[0];
+  }
+  return null;
+}
+
+function findAudioTrack(
+  tracks: AudioTrack[],
+  preference: AudioTrackPreference,
+): AudioTrack | null {
   const title = subtitleMatchKey(preference.title);
   const lang = subtitleMatchKey(preference.lang);
   if (title || lang) {
@@ -252,14 +355,29 @@ export function PlayerDrawer({
     kind: "warning" | "success";
   } | null>(null);
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
+  const [seekPreviewHover, setSeekPreviewHover] = useState<{
+    key: string;
+    left: number;
+    screenX: number;
+    screenY: number;
+    timeRatio: number;
+    position: number;
+    image: string | null;
+    loading: boolean;
+  } | null>(null);
+  const [nativePreviewReady, setNativePreviewReady] = useState(true);
   // 松手后先保持目标位置，等播放器回报接近目标后再跟随实时进度。
   const [seekTarget, setSeekTarget] = useState<number | null>(null);
   const [volumePreview, setVolumePreview] = useState<number | null>(null);
+  const [systemVolume, setSystemVolumeState] = useState(100);
+  const [systemMuted, setSystemMutedState] = useState(false);
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [audioOutputMenuOpen, setAudioOutputMenuOpen] = useState(false);
-  // 字幕整体时间偏移；正数延后、负数提前。每次换集 mpv 都是新进程，重置为 0。
-  const [subtitleDelayMs, setSubtitleDelayMs] = useState(0);
+  // 字幕整体时间偏移；正数延后、负数提前。作为播放器偏好跨集保留。
+  const [subtitleDelayMs, setSubtitleDelayMs] = useState(
+    subtitleDelayPreference,
+  );
   // 全屏时控制栏自动隐藏，鼠标移动时重新出现。
   const [controlsVisible, setControlsVisible] = useState(true);
   const [activityTick, setActivityTick] = useState(0);
@@ -285,7 +403,7 @@ export function PlayerDrawer({
   const flipAnimRef = useRef<Animation | null>(null);
   const flipFrameRef = useRef<number | null>(null);
   const lastFullscreenRef = useRef(fullscreen);
-  const subtitleDelayRef = useRef(0);
+  const subtitleDelayRef = useRef(subtitleDelayPreference);
   // 点击画面收起控制栏后的鼠标冷却截止时间。
   const controlsCooldownUntilRef = useRef(0);
   // 自动连播切集时短暂屏蔽鼠标唤出控制栏。
@@ -303,6 +421,17 @@ export function PlayerDrawer({
     position: number;
   } | null>(null);  // 已应用音频设备偏好的集数，避免每集重复发送命令。
   const appliedAudioDeviceRef = useRef<number | null>(null);
+  const appliedPlaybackPrefsRef = useRef<number | null>(null);
+  const playbackPrefsProgressRef = useRef<{
+    episodeId: number;
+    position: number;
+  } | null>(null);
+  const appliedAudioTrackRef = useRef<number | null>(null);
+  const audioTrackProgressRef = useRef<{
+    episodeId: number;
+    position: number;
+  } | null>(null);
+  const appliedSubtitleDelayRef = useRef<number | null>(null);
   const appliedSubtitleRef = useRef<number | null>(null);
   const subtitleProgressRef = useRef<{
     episodeId: number;
@@ -311,6 +440,19 @@ export function PlayerDrawer({
   // 当前集是否因为设备消失而回退到系统默认。
   const audioFallbackRef = useRef(false);
   const audioNoticeTimerRef = useRef<number | undefined>(undefined);
+  const volumePreviewRef = useRef<number | null>(null);
+  const latestVolumeRef = useRef(100);
+  const volumeSendTimerRef = useRef<number | undefined>(undefined);
+  const previewTimerRef = useRef<number | undefined>(undefined);
+  const previewRequestRef = useRef(0);
+  const previewCacheRef = useRef<Map<string, string>>(new Map());
+  const nativePreviewKeyRef = useRef<string | null>(null);
+  const previewHoverRef = useRef<{
+    key: string;
+    screenX: number;
+    screenY: number;
+    position: number;
+  } | null>(null);
 
   const hideControls = useCallback(() => {
     controlsCooldownUntilRef.current =
@@ -350,6 +492,37 @@ export function PlayerDrawer({
     },
     [],
   );
+
+  useEffect(
+    () => () => {
+      void hidePlayerPreview().catch(() => {});
+    },
+    [],
+  );
+
+  // 音量直接控制 Windows 默认播放设备的主音量；播放器打开期间轮询一次，
+  // 让用户用系统音量键/托盘改音量时界面也能同步。
+  useEffect(() => {
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const value = await getSystemVolume();
+        if (disposed || volumePreviewRef.current !== null) return;
+        latestVolumeRef.current = value.level;
+        setSystemVolumeState(value.level);
+        setSystemMutedState(value.muted);
+      } catch {
+        // 系统音频接口不可用时保留当前界面值。
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   // 控制栏：全屏切换时逐帧跟随视频矩形。
   const controlsRef = useRef<HTMLDivElement>(null);
 
@@ -392,6 +565,7 @@ export function PlayerDrawer({
     setError(null);
     setSeekPreview(null);
     setSeekTarget(null);
+    volumePreviewRef.current = null;
     setVolumePreview(null);
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
@@ -437,8 +611,21 @@ export function PlayerDrawer({
   }, [episode.id, entered, syncVideoRect]);
 
   useEffect(() => {
-    subtitleDelayRef.current = 0;
-    setSubtitleDelayMs(0);
+    subtitleDelayRef.current = subtitleDelayPreference;
+    setSubtitleDelayMs(subtitleDelayPreference);
+    appliedPlaybackPrefsRef.current = null;
+    appliedAudioTrackRef.current = null;
+    appliedSubtitleDelayRef.current = null;
+    playbackPrefsProgressRef.current = null;
+    audioTrackProgressRef.current = null;
+    setSeekPreviewHover(null);
+    previewHoverRef.current = null;
+    nativePreviewKeyRef.current = null;
+    previewRequestRef.current += 1;
+    if (previewTimerRef.current !== undefined) {
+      window.clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = undefined;
+    }
   }, [episode.id]);
   useEffect(() => {
     stallRef.current = { position: -1, since: 0, attempts: 0 };
@@ -616,6 +803,66 @@ export function PlayerDrawer({
     void playerSetSubtitle(track.id).catch(() => {});
   }, [episode.id, playerState]);
 
+  // 倍速是全局偏好；等播放进度启动后再应用。音量/静音由系统负责。
+  useEffect(() => {
+    if (!playerState || playerState.episodeId !== episode.id) return;
+    if (appliedPlaybackPrefsRef.current === episode.id) return;
+    const previous = playbackPrefsProgressRef.current;
+    if (
+      !previous ||
+      previous.episodeId !== episode.id ||
+      Math.abs(playerState.positionMs - previous.position) < 250
+    ) {
+      playbackPrefsProgressRef.current = {
+        episodeId: episode.id,
+        position: playerState.positionMs,
+      };
+      return;
+    }
+    playbackPrefsProgressRef.current = {
+      episodeId: episode.id,
+      position: playerState.positionMs,
+    };
+    appliedPlaybackPrefsRef.current = episode.id;
+    void playerSetSpeed(speedPreference).catch(() => {});
+  }, [episode.id, playerState]);
+
+  // 记住音轨；新一集按标题/语言重新匹配，找不到就用 mpv 默认音轨。
+  useEffect(() => {
+    if (!playerState || playerState.episodeId !== episode.id) return;
+    if (!audioTrackPreference) return;
+    if (appliedAudioTrackRef.current === episode.id) return;
+    if (playerState.audioTracks.length === 0) return;
+    const previous = audioTrackProgressRef.current;
+    if (
+      !previous ||
+      previous.episodeId !== episode.id ||
+      Math.abs(playerState.positionMs - previous.position) < 250
+    ) {
+      audioTrackProgressRef.current = {
+        episodeId: episode.id,
+        position: playerState.positionMs,
+      };
+      return;
+    }
+    audioTrackProgressRef.current = {
+      episodeId: episode.id,
+      position: playerState.positionMs,
+    };
+    appliedAudioTrackRef.current = episode.id;
+    const track = findAudioTrack(playerState.audioTracks, audioTrackPreference);
+    if (track) void playerSetAudio(track.id).catch(() => {});
+  }, [episode.id, playerState]);
+
+  useEffect(() => {
+    if (!playerState || playerState.episodeId !== episode.id) return;
+    if (appliedSubtitleDelayRef.current === episode.id) return;
+    appliedSubtitleDelayRef.current = episode.id;
+    if (subtitleDelayPreference !== 0) {
+      void playerSetSubDelay(subtitleDelayPreference / 1000).catch(() => {});
+    }
+  }, [episode.id, playerState]);
+
   // 鼠标活动：后端轮询系统光标，视频画面上方的移动也能收到。
   useEffect(() => {
     let disposed = false;
@@ -648,7 +895,7 @@ export function PlayerDrawer({
     let unlisten: UnlistenFn | undefined;
 
     onPlayerClick(() => {
-      if (!disposed) hideControls();
+      if (!disposed && fullscreen) hideControls();
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -658,9 +905,9 @@ export function PlayerDrawer({
       disposed = true;
       unlisten?.();
     };
-  }, [hideControls]);
+  }, [hideControls, fullscreen]);
 
-  // 全屏时鼠标静止 2.5 秒收起控制栏；窗口模式只在点击画面时收起。
+  // 全屏时鼠标静止 2.5 秒收起控制栏；窗口模式不自动收起。
   // 控制栏已经隐藏时不再因为暂停/播放等状态变化重新出现。
   useEffect(() => {
     if (!controlsVisible) return;
@@ -779,8 +1026,8 @@ export function PlayerDrawer({
   const durationMs = playerState?.durationMs || episode.durationMs || 0;
   const positionMs =
     seekPreview ?? seekTarget ?? playerState?.positionMs ?? 0;
-  const volume = volumePreview ?? playerState?.volume ?? 100;
-  const muted = playerState?.muted ?? false;
+  const volume = volumePreview ?? systemVolume;
+  const muted = systemMuted;
 
   const subtitleTracks = playerState?.subtitles ?? [];
   const subtitleId = playerState?.subtitleId ?? null;
@@ -872,6 +1119,117 @@ export function PlayerDrawer({
     seekTo(target);
   };
 
+  const showNativeSeekPreview = (
+    image: string,
+    screenX: number,
+    screenY: number,
+    key: string,
+  ) => {
+    if (nativePreviewKeyRef.current !== key) {
+      nativePreviewKeyRef.current = key;
+      void showPlayerPreview(image, screenX, screenY)
+        .then(() => setNativePreviewReady(true))
+        .catch(() => setNativePreviewReady(false));
+    } else {
+      void movePlayerPreview(screenX, screenY).catch(() => {});
+    }
+  };
+
+  const hideNativeSeekPreview = () => {
+    if (nativePreviewKeyRef.current === null) return;
+    nativePreviewKeyRef.current = null;
+    void hidePlayerPreview().catch(() => {});
+  };
+
+  const showSeekPreview = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (durationMs <= 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.min(
+      1,
+      Math.max(0, (event.clientX - rect.left) / rect.width),
+    );
+    const position = Math.round(ratio * durationMs);
+    const bucket = Math.floor(position / 5000) * 5000;
+    const key = `${episode.id}:${bucket}`;
+    const cached = previewCacheRef.current.get(key);
+    const left = Math.min(
+      window.innerWidth - 140,
+      Math.max(8, event.clientX - 72),
+    );
+    const screenX = event.clientX - 80;
+    const screenY = Math.max(8, rect.top - 132);
+    const timeRatio = Math.min(0.94, Math.max(0.06, ratio));
+    previewHoverRef.current = { key, screenX, screenY, position };
+    setSeekPreviewHover({
+      key,
+      left,
+      screenX,
+      screenY,
+      timeRatio,
+      position,
+      image: cached ?? null,
+      loading: cached == null,
+    });
+    if (cached) {
+      if (previewTimerRef.current !== undefined) {
+        window.clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = undefined;
+      }
+      if (nativePreviewReady) {
+        showNativeSeekPreview(cached, screenX, screenY, key);
+      }
+      return;
+    }
+    if (nativePreviewReady) hideNativeSeekPreview();
+    if (previewTimerRef.current !== undefined) {
+      window.clearTimeout(previewTimerRef.current);
+    }
+    previewTimerRef.current = window.setTimeout(() => {
+      previewTimerRef.current = undefined;
+      const request = ++previewRequestRef.current;
+      void playerPreviewFrame(episode.id, bucket)
+        .then((image) => {
+          if (request !== previewRequestRef.current) return;
+          const cache = previewCacheRef.current;
+          cache.set(key, image);
+          if (cache.size > 120) {
+            const first = cache.keys().next().value;
+            if (first) cache.delete(first);
+          }
+          setSeekPreviewHover((current) =>
+            current?.key === key
+              ? { ...current, image, loading: false }
+              : current,
+          );
+          const hover = previewHoverRef.current;
+          if (hover?.key === key) {
+            showNativeSeekPreview(image, hover.screenX, hover.screenY, key);
+          }
+        })
+        .catch(() => {
+          if (request !== previewRequestRef.current) return;
+          setSeekPreviewHover((current) =>
+            current?.key === key
+              ? { ...current, image: null, loading: false }
+              : current,
+          );
+          if (nativePreviewReady) hideNativeSeekPreview();
+        });
+    }, 220);
+  };
+
+  const hideSeekPreview = () => {
+    if (previewTimerRef.current !== undefined) {
+      window.clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = undefined;
+    }
+    previewRequestRef.current += 1;
+    previewHoverRef.current = null;
+    hideNativeSeekPreview();
+    setSeekPreviewHover(null);
+  };
+
   const closeMenus = () => {
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
@@ -900,6 +1258,15 @@ export function PlayerDrawer({
   };
 
   const selectAudio = (id: number) => {
+    const track = audioTracks.find((item) => item.id === id);
+    if (!track) return;
+    audioTrackPreference = {
+      id: track.id,
+      title: track.title,
+      lang: track.lang,
+    };
+    saveAudioTrackPreference(audioTrackPreference);
+    appliedAudioTrackRef.current = episode.id;
     closeMenus();
     void playerSetAudio(id);
   };
@@ -918,19 +1285,73 @@ export function PlayerDrawer({
     void playerSetAudioDevice(device);
   };
 
+  const commitSystemVolume = () => {
+    if (volumeSendTimerRef.current !== undefined) {
+      window.clearTimeout(volumeSendTimerRef.current);
+      volumeSendTimerRef.current = undefined;
+    }
+    volumePreviewRef.current = null;
+    setVolumePreview(null);
+    const target = latestVolumeRef.current;
+    void setSystemVolume(target)
+      .then(async () => {
+        const value = await getSystemVolume();
+        setSystemVolumeState(value.level);
+        setSystemMutedState(value.muted);
+      })
+      .catch(() => {});
+  };
+
+  const changeVolume = (value: number) => {
+    const next = Math.min(100, Math.max(0, Math.round(value)));
+    latestVolumeRef.current = next;
+    volumePreviewRef.current = next;
+    setVolumePreview(next);
+    if (systemMuted) {
+      setSystemMutedState(false);
+      void setSystemMuted(false).catch(() => {});
+    }
+    // 拖动时合并系统音量写入，避免每移动一像素都走一次 COM。
+    if (volumeSendTimerRef.current === undefined) {
+      volumeSendTimerRef.current = window.setTimeout(() => {
+        volumeSendTimerRef.current = undefined;
+        void setSystemVolume(latestVolumeRef.current).catch(() => {});
+      }, 40);
+    }
+  };
+
+  const toggleMute = () => {
+    const next = !systemMuted;
+    setSystemMutedState(next);
+    void setSystemMuted(next).catch(() => {
+      setSystemMutedState((current) => !current);
+    });
+  };
+
+  const changeSpeed = (value: number) => {
+    if (!SPEED_OPTIONS.includes(value)) return;
+    speedPreference = value;
+    saveStoredValue(SPEED_STORAGE_KEY, String(value));
+    void playerSetSpeed(value);
+  };
+
   const adjustSubtitleDelay = (deltaMs: number) => {
     const next = Math.max(
       -60_000,
       Math.min(60_000, subtitleDelayRef.current + deltaMs),
     );
     subtitleDelayRef.current = next;
+    subtitleDelayPreference = next;
     setSubtitleDelayMs(next);
+    saveStoredValue(SUBTITLE_DELAY_STORAGE_KEY, String(next));
     void playerSetSubDelay(next / 1000);
   };
 
   const resetSubtitleDelay = () => {
     subtitleDelayRef.current = 0;
+    subtitleDelayPreference = 0;
     setSubtitleDelayMs(0);
+    saveStoredValue(SUBTITLE_DELAY_STORAGE_KEY, "0");
     void playerSetSubDelay(0);
   };
 
@@ -1296,7 +1717,9 @@ export function PlayerDrawer({
 
         <div
           ref={videoRef}
-          onClick={hideControls}
+          onClick={() => {
+            if (fullscreen) hideControls();
+          }}
           className={`relative w-full bg-black ${
             fullscreen ? "min-h-0 flex-1" : "aspect-video shrink-0"
           }`}
@@ -1336,7 +1759,7 @@ export function PlayerDrawer({
 
         <div
           ref={controlsRef}
-          className={`grid shrink-0 transition-[grid-template-rows] ease-out ${
+          className={`player-controls grid shrink-0 transition-[grid-template-rows] ease-out ${
             !controlsVisible ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
           }`}
           style={{ transitionDuration: `${CONTROLS_HIDE_DURATION_MS}ms` }}
@@ -1347,7 +1770,7 @@ export function PlayerDrawer({
             }`}
           >
             <div
-              className={`border-b border-neutral-800 bg-neutral-900/60 px-4 py-3 transition-opacity ease-out ${
+              className={`border-b border-neutral-800 bg-neutral-900/60 px-4 pb-3 pt-8 transition-opacity ease-out ${
                 !controlsVisible ? "opacity-0" : "opacity-100"
               }`}
               style={{ transitionDuration: `${CONTROLS_HIDE_DURATION_MS}ms` }}
@@ -1510,24 +1933,43 @@ export function PlayerDrawer({
                 <span className="w-14 text-right text-[11px] tabular-nums text-neutral-400">
                   {formatTime(positionMs)}
                 </span>
-                <input
-                  type="range"
-                  data-player-seek="true"
-                  min={0}
-                  max={Math.max(1, durationMs)}
-                  value={Math.min(positionMs, Math.max(1, durationMs))}
-                  onChange={(event) => setSeekPreview(Number(event.target.value))}
-                  onPointerUp={(event) => {
-                    commitSeek();
-                    // 点击/拖动后把焦点还给播放器，避免空格键在进度条上
-                    // 留下焦点框，也避免焦点继续被 range input 吃掉。
-                    event.currentTarget.blur();
-                  }}
-                  onPointerCancel={(event) => event.currentTarget.blur()}
-                  onKeyUp={commitSeek}
-                  disabled={!playerState || durationMs <= 0}
-                  className="h-1 flex-1 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
-                />
+                <div
+                  className="relative flex-1"
+                  onPointerMove={showSeekPreview}
+                  onPointerLeave={hideSeekPreview}
+                >
+                  {seekPreviewHover && (
+                    <div
+                      className="pointer-events-none absolute z-20 -translate-x-1/2 rounded bg-black/80 px-1.5 py-0.5 text-[10px] tabular-nums text-white shadow-lg"
+                      style={{
+                        left: `${seekPreviewHover.timeRatio * 100}%`,
+                        bottom: "calc(100% + 2px)",
+                      }}
+                    >
+                      {formatTime(seekPreviewHover.position)}
+                    </div>
+                  )}
+                  <input
+                    type="range"
+                    data-player-seek="true"
+                    min={0}
+                    max={Math.max(1, durationMs)}
+                    value={Math.min(positionMs, Math.max(1, durationMs))}
+                    onChange={(event) =>
+                      setSeekPreview(Number(event.target.value))
+                    }
+                    onPointerUp={(event) => {
+                      commitSeek();
+                      // 点击/拖动后把焦点还给播放器，避免空格键在进度条上
+                      // 留下焦点框，也避免焦点继续被 range input 吃掉。
+                      event.currentTarget.blur();
+                    }}
+                    onPointerCancel={(event) => event.currentTarget.blur()}
+                    onKeyUp={commitSeek}
+                    disabled={!playerState || durationMs <= 0}
+                    className="h-1 w-full cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
+                  />
+                </div>
                 <span className="w-14 text-[11px] tabular-nums text-neutral-500">
                   {formatTime(durationMs)}
                 </span>
@@ -1586,7 +2028,7 @@ export function PlayerDrawer({
 
                 <button
                   type="button"
-                  onClick={() => playerState && void playerSetMuted(!muted)}
+                  onClick={toggleMute}
                   disabled={!playerState}
                   className={iconButton}
                   title={muted ? "取消静音" : "静音"}
@@ -1598,15 +2040,15 @@ export function PlayerDrawer({
                   min={0}
                   max={100}
                   value={muted ? 0 : Math.round(volume)}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setVolumePreview(value);
-                    void playerSetVolume(value);
-                  }}
-                  onPointerUp={() => setVolumePreview(null)}
+                  onChange={(event) =>
+                    changeVolume(Number(event.target.value))
+                  }
+                  onPointerUp={commitSystemVolume}
+                  onPointerCancel={commitSystemVolume}
+                  onKeyUp={commitSystemVolume}
                   disabled={!playerState}
                   className="h-1 w-24 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
-                  title="音量"
+                  title="系统音量"
                 />
                 <span className="w-8 text-[11px] tabular-nums text-neutral-500">
                   {Math.round(muted ? 0 : volume)}
@@ -1616,13 +2058,13 @@ export function PlayerDrawer({
                   <select
                     value={playerState?.speed ?? 1}
                     onChange={(event) =>
-                      void playerSetSpeed(Number(event.target.value))
+                      changeSpeed(Number(event.target.value))
                     }
                     disabled={!playerState}
                     className="rounded-md border border-neutral-800 bg-neutral-950 px-1.5 py-1 text-[11px] text-neutral-300 focus:border-indigo-500/60 focus:outline-none disabled:opacity-40"
                     title="播放速度"
                   >
-                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                    {SPEED_OPTIONS.map((speed) => (
                       <option key={speed} value={speed}>
                         {speed}×
                       </option>
@@ -1752,6 +2194,29 @@ export function PlayerDrawer({
           </div>
         )}
       </aside>
+      {!nativePreviewReady &&
+        seekPreviewHover &&
+        createPortal(
+          <div
+            className="pointer-events-none fixed bottom-3 z-[90] w-32"
+            style={{ left: seekPreviewHover.left }}
+          >
+            <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg border border-neutral-700 bg-neutral-950 shadow-2xl">
+              {seekPreviewHover.image ? (
+                <img
+                  src={seekPreviewHover.image}
+                  alt=""
+                  className="h-full w-full object-cover"
+                />
+              ) : seekPreviewHover.loading ? (
+                <Loader2 size={16} className="animate-spin text-neutral-500" />
+              ) : (
+                <span className="text-[10px] text-neutral-500">无法预览</span>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </>
   );
 }

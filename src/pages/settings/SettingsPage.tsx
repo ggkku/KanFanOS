@@ -12,6 +12,7 @@ import {
   Power,
   RefreshCw,
   Server,
+  Trash2,
   Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -22,9 +23,11 @@ import {
   setQbittorrentAdvanced,
 } from "../../api/resources";
 import {
+  cleanupInvalidSeries,
   clearThumbnailCache,
   getCacheStats,
   getLibraryStats,
+  listInvalidSeries,
   quitApp,
   repairSeriesConfigs,
   setAutoStart,
@@ -40,6 +43,8 @@ import type {
   AppSettings,
   CacheStats,
   ConfigRepairSummary,
+  InvalidSeries,
+  InvalidSeriesCleanup,
   LibraryStats,
   PageTransition,
   SeriesTransition,
@@ -53,6 +58,7 @@ interface SettingsPageProps {
   onRescan: () => void;
   onSettingsChange: (settings: AppSettings) => void;
   onCacheCleared: () => void;
+  onLibraryChanged: () => void;
 }
 
 interface InfoRowProps {
@@ -119,6 +125,7 @@ export function SettingsPage({
   onRescan,
   onSettingsChange,
   onCacheCleared,
+  onLibraryChanged,
 }: SettingsPageProps) {
   const [stats, setStats] = useState<LibraryStats | null>(null);
   const [cache, setCache] = useState<CacheStats | null>(null);
@@ -126,6 +133,13 @@ export function SettingsPage({
   const [repairing, setRepairing] = useState(false);
   const [repairResult, setRepairResult] =
     useState<ConfigRepairSummary | null>(null);
+  const [invalidSeries, setInvalidSeries] = useState<InvalidSeries[] | null>(
+    null,
+  );
+  const [invalidError, setInvalidError] = useState<string | null>(null);
+  const [cleanupResult, setCleanupResult] =
+    useState<InvalidSeriesCleanup | null>(null);
+  const [cleaningInvalid, setCleaningInvalid] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [qbAdvanced, setQbAdvanced] = useState(false);
 
@@ -160,6 +174,31 @@ export function SettingsPage({
       disposed = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (settings?.libraryId == null) {
+      setInvalidSeries([]);
+      setInvalidError(null);
+      return;
+    }
+    if (scanning) return;
+    const libraryId = settings.libraryId;
+    let disposed = false;
+    setInvalidSeries(null);
+    setInvalidError(null);
+    void listInvalidSeries(libraryId)
+      .then((items) => {
+        if (!disposed) setInvalidSeries(items);
+      })
+      .catch((reason) => {
+        if (disposed) return;
+        setInvalidSeries([]);
+        setInvalidError(errorMessage(reason));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [settings?.libraryId, scanning]);
 
   const hasRoot = settings?.libraryRoot != null;
 
@@ -312,6 +351,53 @@ export function SettingsPage({
       setError(errorMessage(err));
     } finally {
       setRepairing(false);
+    }
+  };
+
+  const cleanupInvalid = async () => {
+    if (
+      settings?.libraryId == null ||
+      cleaningInvalid ||
+      scanning ||
+      invalidSeries == null ||
+      invalidSeries.length === 0
+    ) {
+      return;
+    }
+    const libraryId = settings.libraryId;
+    const totalMissing = invalidSeries.reduce(
+      (sum, item) => sum + item.missingVideos,
+      0,
+    );
+    const names = invalidSeries
+      .slice(0, 6)
+      .map((item) => `· ${item.name}`)
+      .join("\n");
+    const confirmed = await ask(
+      `清理 ${invalidSeries.length} 部失效番剧？\n\n${names}${
+        invalidSeries.length > 6 ? "\n· …" : ""
+      }\n\n这些番剧目录已经不存在，会删除 ${totalMissing} 条失效视频索引及其观看记录，不可恢复。`,
+      {
+        title: "清理失效番剧",
+        kind: "warning",
+        okLabel: "清理",
+        cancelLabel: "取消",
+      },
+    );
+    if (!confirmed) return;
+
+    setCleaningInvalid(true);
+    setError(null);
+    setCleanupResult(null);
+    try {
+      const result = await cleanupInvalidSeries(libraryId);
+      setCleanupResult(result);
+      setInvalidSeries(await listInvalidSeries(libraryId));
+      onLibraryChanged();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setCleaningInvalid(false);
     }
   };
 
@@ -530,6 +616,56 @@ export function SettingsPage({
           >
             <Wrench size={12} />
             {repairing ? "检查中…" : "检查并修复"}
+          </button>
+        </div>
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <Trash2 size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">失效番剧</div>
+          <div
+            className={`min-w-0 flex-1 text-[11px] leading-relaxed ${
+              invalidSeries && invalidSeries.length > 0
+                ? "text-amber-300"
+                : "text-neutral-500"
+            }`}
+            title={
+              invalidSeries && invalidSeries.length > 0
+                ? invalidSeries
+                    .slice(0, 8)
+                    .map((item) => `${item.name}\n${item.path}`)
+                    .join("\n\n")
+                : undefined
+            }
+          >
+            {invalidError
+              ? invalidError
+              : invalidSeries == null
+                ? "检查中…"
+                : invalidSeries.length === 0
+                  ? cleanupResult
+                    ? `已清理 ${cleanupResult.removedSeries} 部、${cleanupResult.removedVideos} 条失效索引`
+                    : "没有目录已不存在的失效番剧"
+                  : `${invalidSeries.length} 部目录已不存在，${invalidSeries.reduce(
+                      (sum, item) => sum + item.missingVideos,
+                      0,
+                    )} 条失效索引${
+                      cleanupResult
+                        ? `（刚清理 ${cleanupResult.removedSeries} 部）`
+                        : ""
+                    }`}
+          </div>
+          <button
+            type="button"
+            onClick={() => void cleanupInvalid()}
+            disabled={
+              cleaningInvalid ||
+              scanning ||
+              invalidSeries == null ||
+              invalidSeries.length === 0
+            }
+            title="删除目录已不存在的番剧索引及其观看记录"
+            className={actionButton}
+          >
+            {cleaningInvalid ? "清理中…" : "清理"}
           </button>
         </div>
         <InfoRow
