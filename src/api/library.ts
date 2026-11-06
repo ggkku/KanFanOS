@@ -76,6 +76,15 @@ export function setWindowMode(mode: WindowMode): Promise<AppSettings> {
   return invoke<AppSettings>("set_window_mode", { mode });
 }
 
+export function minimizeToTray(): Promise<void> {
+  return invoke<void>("minimize_to_tray");
+}
+
+/** 退出前并行关闭内置 qBittorrent，不等待进程退出。 */
+export function beginExit(): Promise<void> {
+  return invoke<void>("begin_exit");
+}
+
 export function quitApp(): Promise<void> {
   return invoke<void>("quit_app");
 }

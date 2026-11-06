@@ -351,3 +351,48 @@ textarea,
 .player-controls :is(button, select, input):focus {
   outline: none;
 }
+
+/* 退出遮罩：logo 淡入 + 品牌文字左→右出现 + 进度条。
+   动画播放期间内置 qBittorrent 已在后台关闭，真正的退出等待被藏在这 1.2 秒里。 */
+@keyframes kf-quit-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.kf-quit-overlay { animation: kf-quit-fade-in 180ms ease-out both; }
+
+@keyframes kf-quit-logo-in {
+  from { opacity: 0; transform: scale(0.86); filter: blur(6px); }
+  to { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+
+.kf-quit-logo {
+  animation: kf-quit-logo-in 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* 品牌文字用 clip-path 从左往右揭开。 */
+@keyframes kf-quit-brand-in {
+  from { clip-path: inset(0 100% 0 0); opacity: 0.25; }
+  to { clip-path: inset(0 0 0 0); opacity: 1; }
+}
+
+.kf-quit-brand {
+  animation: kf-quit-brand-in 620ms cubic-bezier(0.16, 1, 0.3, 1) 360ms both;
+}
+
+@keyframes kf-quit-text-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.kf-quit-text { animation: kf-quit-text-in 400ms ease-out 760ms both; }
+
+@keyframes kf-quit-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+.kf-quit-progress {
+  transform-origin: left;
+  animation: kf-quit-progress 1200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}

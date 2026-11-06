@@ -9,6 +9,7 @@ import {
   HardDrive,
   Image,
   Info,
+  Minimize2,
   Power,
   RefreshCw,
   Server,
@@ -18,16 +19,19 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { SelectMenu } from "../../components/common/SelectMenu";
+import gunKucharLogo from "../../../GunKuchar Present icon.png";
 import {
   getQbittorrentConfig,
   setQbittorrentAdvanced,
 } from "../../api/resources";
 import {
+  beginExit,
   cleanupInvalidSeries,
   clearThumbnailCache,
   getCacheStats,
   getLibraryStats,
   listInvalidSeries,
+  minimizeToTray,
   quitApp,
   repairSeriesConfigs,
   setAutoStart,
@@ -141,6 +145,7 @@ export function SettingsPage({
     useState<InvalidSeriesCleanup | null>(null);
   const [cleaningInvalid, setCleaningInvalid] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [quitting, setQuitting] = useState(false);
   const [qbAdvanced, setQbAdvanced] = useState(false);
 
   useEffect(() => {
@@ -280,10 +285,34 @@ export function SettingsPage({
     }
   };
 
+  const handleMinimizeToTray = async () => {
+    try {
+      await minimizeToTray();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
   const handleQuit = async () => {
+    if (quitting) return;
+
+    setQuitting(true);
+    setError(null);
+
+    try {
+      // 与退出动画并行，先让内置 qBittorrent 开始优雅关闭。
+      await beginExit();
+    } catch {
+      // 提前关闭失败不影响退出，quit_app 的退出流程还会再请求一次。
+    }
+
+    // 让 logo 动画完整播放，也把后台清理的时间藏进动画里。
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+
     try {
       await quitApp();
     } catch (err) {
+      setQuitting(false);
       setError(errorMessage(err));
     }
   };
@@ -683,7 +712,7 @@ export function SettingsPage({
               : "读取中…"
           }
         />
-        <InfoRow icon={Info} label="版本" value="KanFanOS 1.2.1" />
+        <InfoRow icon={Info} label="版本" value="KanFanOS 1.3.4" />
       </section>
 
       {error && (
@@ -697,16 +726,46 @@ export function SettingsPage({
         已存在的文件不会被覆盖。数据库只保存索引，清理缓存不会删除任何原始视频。
       </p>
 
-      <div className="mt-auto flex justify-end pt-2">
+      <div className="mt-auto flex justify-end gap-2 pt-2">
+        <button
+          type="button"
+          onClick={() => void handleMinimizeToTray()}
+          disabled={quitting}
+          title="隐藏窗口，应用继续在系统托盘运行"
+          className="flex items-center gap-2 rounded-lg border border-neutral-700 bg-neutral-800 px-3.5 py-2 text-xs font-medium text-neutral-200 transition-colors hover:bg-neutral-700"
+        >
+          <Minimize2 size={14} />
+          最小化到托盘
+        </button>
         <button
           type="button"
           onClick={() => void handleQuit()}
+          disabled={quitting}
           className="flex items-center gap-2 rounded-lg bg-red-600 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-red-500"
         >
           <Power size={14} />
           退出系统
         </button>
       </div>
+
+      {quitting && (
+        <div className="kf-quit-overlay fixed inset-0 z-50 flex flex-col items-center justify-center bg-neutral-950">
+          <img
+            src={gunKucharLogo}
+            alt="GunKuchar Present"
+            className="kf-quit-logo h-24 w-24"
+          />
+          <div className="kf-quit-brand mt-5 whitespace-nowrap text-2xl font-semibold tracking-wide text-neutral-100">
+            GunKuchar Present
+          </div>
+          <div className="kf-quit-text mt-6 text-xs tracking-[0.32em] text-neutral-400">
+            正在退出
+          </div>
+          <div className="mt-4 h-[2px] w-36 overflow-hidden rounded-full bg-neutral-800">
+            <div className="kf-quit-progress h-full w-full rounded-full bg-sky-500" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

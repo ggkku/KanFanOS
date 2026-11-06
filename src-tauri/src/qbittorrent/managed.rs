@@ -80,6 +80,17 @@ impl ManagedQbittorrent {
         }
     }
 
+    /// 提前请求内置实例关闭，但不等待进程退出。
+    ///
+    /// 退出动画播放期间调用，和界面动画并行，真正 `stop` 时通常已经关得差不多了。
+    pub fn request_stop(&self) {
+        if let Ok(guard) = self.inner.try_lock()
+            && let Some(running) = guard.as_ref()
+        {
+            request_shutdown(running.port);
+        }
+    }
+
     /// 应用退出时调用：先请求 WebUI 关闭，超时再强制结束。
     pub fn stop(&self) {
         let mut guard = self.inner.blocking_lock();
@@ -89,7 +100,9 @@ impl ManagedQbittorrent {
 
         request_shutdown(running.port);
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // 退出动画开始时就已发过关闭请求，这里只需等待它收尾；
+        // 超时上限保留 2 秒，避免界面长时间停在被冻结的窗口上。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             match running.child.try_wait() {
                 Ok(Some(_)) => return,

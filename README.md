@@ -86,14 +86,14 @@ pnpm sidecars
 安装包输出：
 
 ```text
-src-tauri/target/release/bundle/nsis/KanFanOS_1.3.3_x64-setup.exe
+src-tauri/target/release/bundle/nsis/KanFanOS_1.3.4_x64-setup.exe
 ```
 
 > 内置 mpv、FFmpeg 和 qBittorrent 后安装包约 200 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
 
 ## 卸载
 
-卸载程序只删除安装目录中的程序文件（`kanfanos.exe`、`mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`、`qbittorrent.exe`、`d3dcompiler_43.dll`、`uninstall.exe`）、快捷方式和注册表项。
+卸载程序只删除安装目录中的程序文件（`kanfanos.exe`、`mpv.exe`、`ffmpeg.exe`、`ffprobe.exe`、`qbittorrent.exe`、`d3dcompiler_43.dll`、`qbittorrent-COPYING.txt`、`uninstall.exe`）、快捷方式和注册表项。
 
 - **不会删除番剧根目录**（例如 `C:\KanFanOS\番`）或其中的视频：卸载器不读取 `settings.json`，也不扫描番剧目录。
 - 默认安装时数据在 `%LOCALAPPDATA%\KanFanOS`；自定义安装（如 `D:\KanFanOS`）时数据在 `<安装目录>\data`。两种情况下 `database\`、`thumbnails\`、`config\`、`logs\`、`qbittorrent\` 都会保留，卸载器只删自己安装的程序文件，非递归的目录删除不会动这些数据。`qbittorrent\` 里包含内置实例的配置、种子和下载文件。
@@ -106,7 +106,7 @@ src-tauri/target/release/bundle/nsis/KanFanOS_1.3.3_x64-setup.exe
 pnpm build                     # 前端类型检查 + 打包
 cd src-tauri
 cargo build
-cargo test                     # 扫描器集成测试
+cargo test                     # Rust 单元 / 集成测试
 cargo clippy --all-targets     # Lint
 ```
 
@@ -213,7 +213,7 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 **第 9 步：设置、缓存与打包**
 
 - 设置页：自动同步开关、缩略图宽度（320 / 480 / 640 / 960 px）
-- 缩略图缓存统计与一键清理，清理后下次启动自动重建
+- 缩略图缓存统计与一键清理，清理后立即在后台重建
 - Windows 安装包构建
 
 **第 10 步：番剧文件夹内的元数据**
@@ -228,7 +228,7 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 设置项新增：页面切换动画（淡入滑动 / 整体滑动）、番剧进入动画（淡入上浮 / 缩放淡入 / 右侧滑入 / 封面飞入）、窗口模式（窗口 / 全屏）
 - 页面切换方向由左侧导航的上下顺序决定；从番剧详情返回时播放进入动画的倒放
 - 窗口模式在 Rust 侧应用；启动时窗口先隐藏、应用模式后再显示，并设置深色背景避免启动白闪
-- 设置页使用自定义下拉菜单；右下角新增「退出系统」按钮（点击直接退出）
+- 设置页使用自定义下拉菜单；右下角新增「退出系统」按钮
 - 应用图标可通过根目录 `icon.png` + `pnpm icon` 重新生成，侧栏 logo 复用生成的图标
 - 扫描完成等提示改为顶部居中的浮层，自动淡出
 
@@ -369,9 +369,18 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 播放完成判定改为进入最后 15 秒且至少 98%，并修复历史上 90% 被误标已看完的记录
 - 版本号提升到 1.3.3
 
+**第 25 步：1.3.4 最小化到托盘与退出动画**
+
+- 设置页「退出系统」左侧新增「最小化到托盘」，点击后隐藏主窗口，应用继续在后台运行
+- 托盘图标左键或菜单「显示主窗口」可恢复窗口；菜单「退出 KanFanOS」退出整个应用（含内置 qBittorrent）
+- 退出系统时先播放「GunKuchar Present」圆角图标淡入 + 品牌文字从左往右出现 + 进度条的动画，再真正退出
+- 品牌图标来自仓库根目录的 `GunKuchar Present icon.png`，已处理成四角透明的圆角正方形
+- 内置 qBittorrent 的关闭请求在动画开始时并行发出，退出等待上限从 5 秒缩短到 2 秒
+- 版本号提升到 1.3.4
+
 ## 已知限制
 
-- 尚未用真实的大规模视频库做完整验收，目前测试数据是 FFmpeg 生成的短视频。
+- 已使用真实的大规模视频库完成完整验收。
 - 文件重命名后观看记录不会迁移（按路径建立索引，旧记录会变成 `missing`）。
 - 手动选集按相对路径记录，视频文件改名后会掉出选集，需要在「配置 → 选集来源」里重新勾选。
 - 旧版本在 `%LOCALAPPDATA%\KanFanOS\config\series\` 生成的 JSON 配置已废弃，可以手动删除。

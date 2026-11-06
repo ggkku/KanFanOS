@@ -16,6 +16,7 @@ mod state;
 mod system_volume;
 mod time;
 mod tools;
+mod tray;
 mod watcher;
 mod window;
 
@@ -181,6 +182,11 @@ fn initialize(app: &mut tauri::App) -> Result<()> {
         });
     }
 
+    // 托盘常驻；失败只记日志，不影响主窗口使用。
+    if let Err(error) = tray::create(app.handle()) {
+        paths::append_log(&root, &format!("创建系统托盘失败: {error:#}"));
+    }
+
     // 内置 qBittorrent 跟随应用启动，资源页只负责连接和展示。
     commands::resources::spawn_qbittorrent_at_startup(app.handle().clone());
 
@@ -220,6 +226,8 @@ pub fn run() {
             commands::settings::set_page_transition,
             commands::settings::set_series_transition,
             commands::settings::set_window_mode,
+            commands::settings::minimize_to_tray,
+            commands::settings::begin_exit,
             commands::settings::quit_app,
             commands::cache::get_cache_stats,
             commands::cache::clear_thumbnail_cache,

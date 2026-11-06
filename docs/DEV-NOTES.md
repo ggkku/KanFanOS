@@ -146,6 +146,8 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 启动流程：`tauri.conf.json` 里窗口 `visible: false` → Rust 初始化时应用窗口模式 → `window.show()`。配合 `backgroundColor: "#0a0a0a"` 和 `index.html` 里 `html/body/#root` 的内联深色背景，避免启动白闪。
 - **真正的独占全屏无法实现**：WebView2 由 DWM 合成，没有 DXGI 交换链接管显示器的能力。只保留「窗口 / 全屏」两种模式；不要提供假的「独占全屏」选项。
 - `quit_app` 命令内部调用 `app.exit(0)`。退出时 WebView2 可能打印 `Failed to unregister class Chrome_WidgetWin_0`，这是关闭阶段的正常日志噪音。
+- 系统托盘由 `tray::create` 在初始化时创建，`tauri` 依赖需要启用 `tray-icon` feature。托盘图标优先取 `default_window_icon()`，取不到时回退到 `include_image!` 编译期嵌入的 `icons/128x128.png`。「最小化到托盘」只执行 `window.hide()`，RSS 调度和内置 qBittorrent 继续运行；从托盘退出仍走 `app.exit(0)`，由 `RunEvent::Exit` 负责停止 qBittorrent。
+- 退出卡顿主要来自 `ManagedQbittorrent::stop` 在 `RunEvent::Exit` 里同步等待 qBittorrent 进程退出。现在前端点击「退出系统」后先调用 `begin_exit`，在后台线程里发出 WebUI shutdown 请求，同时播放约 1.2 秒的退出动画，之后再调用 `quit_app`；`stop` 的等待上限也从 5 秒减到 2 秒。动画是 `SettingsPage` 里固定定位的遮罩，图标使用仓库根目录的 `GunKuchar Present icon.png`（已处理成四角透明的圆角正方形，Vite 直接打包），图标淡入放大到 100% 后保持静止，品牌文字用 `clip-path` 从左往右揭开。
 - NSIS 默认 `currentUser`，默认安装目录 `%LOCALAPPDATA%\KanFanOS` 正好与旧数据目录相同；装到自定义目录（如 `D:\KanFanOS`）时数据在 `<安装目录>\data`。Tauri 卸载器只删除它安装的具体文件，`RMDir "$INSTDIR"` 是**非递归**的，所以两种布局下的 `database\`、`thumbnails\`、`config\`、`logs\`（以及 `data` 目录）都会保留；它不会读取 `settings.json`，因此不会删除番剧根目录。
 - 卸载页的「删除应用数据」只执行 `RmDir /r "$LOCALAPPDATA\com.kanfanos.app"`（WebView2 数据），不会清理 `%LOCALAPPDATA%\KanFanOS` 或 `<安装目录>\data` 里的媒体库数据。不要把番剧根目录设在这些目录内部，手动清理时才会误删。
 

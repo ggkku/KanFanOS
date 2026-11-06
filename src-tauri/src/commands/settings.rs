@@ -127,6 +127,25 @@ pub fn set_auto_start(
     to_app_settings(state.inner(), settings)
 }
 
+/// 退出前的准备：在后台请求内置 qBittorrent 关闭，与退出动画并行。
+///
+/// 只发送关闭请求、不等待进程退出，真正的等待仍在 `RunEvent::Exit` 里完成，
+/// 这样退出流程不会在点击后立刻阻塞主线程。
+#[tauri::command]
+pub fn begin_exit(app: AppHandle) {
+    std::thread::spawn(move || {
+        app.state::<crate::qbittorrent::ManagedQbittorrent>()
+            .request_stop();
+    });
+}
+
+/// 隐藏主窗口，应用继续在系统托盘运行。
+#[tauri::command]
+pub fn minimize_to_tray(app: AppHandle) -> Result<(), String> {
+    let window = crate::window::main_window(&app).ok_or("找不到主窗口")?;
+    window.hide().map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
