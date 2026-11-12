@@ -217,6 +217,15 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
 - 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
 
+## 1.3.5 系统音频输出与集数完整性
+
+- 播放器「音频输出」改为切换 Windows 默认播放设备：`system_audio.rs` 用 Core Audio 枚举 `EnumAudioEndpoints(eRender)`，通过未公开的 `IPolicyConfig::SetDefaultEndpoint` 为 eConsole / eMultimedia / eCommunications 设置默认端点；端点 ID `{0.0.0.00000000}.{GUID}` 转成 mpv 的 `wasapi/{GUID}` 后立即 `set_property audio-device`，正在播放的 mpv 会跟着切。音量仍由 `system_volume` 控制默认端点，所以切换后滑块天然指向新设备；前端切换后重新枚举并立即读一次音量。
+- 旧的 mpv 音频设备偏好（`kanfanos.player.audioDevice`）、断线回退提示和每集重发逻辑已删除。`windows-core` 需要作为直接依赖，因为 `windows_interface::interface` 宏展开会引用 `::windows_core`；`BOOL` 在 `windows::core` 下，不在 `Foundation`。
+- 集数/版本解析集中到 `episode_names.rs`，RSS 匹配和文件分析共用。`version_number` 不能用 `\bv(\d+)\b`（`06v2` 里 `6` 和 `v` 都是单词字符，没有单词边界），Rust regex 又不支持后行断言，改为 `(?:^|[^a-z])v(\d+)`。解析文件名前先去掉扩展名，否则 `- 02.mkv` 的集数后面跟着 `.` 会匹配失败；`_` 也作为集数结尾分隔符（`03_Sintel.mp4`）。
+- `series_episode_issues` 只查询 `videos.kind = 'main'`（番剧配置里被选为选集的视频，自动/手动模式一样），「其它视频」不参与重复/缺集统计。重复 = 同一集多个文件；缺集只看最小～最大集数之间，首尾缺失不算。封面显示「重复 N」「缺 N 集」，悬停列出文件名/缺失集数；详情页与播放器按 `episodeNumber`、同集按 `episodeVersion` 排序。
+- 自动下载支持同集新版本：`rss_matches` 的已入队记录按集取标题（`queued_episode_titles`），解析出最高版本和字幕组；候选条件为「新集数 > last_episode」或「同集、版本更高、同字幕组」（任一侧识别不到字幕组时只看版本）。一次刷新仍只下一集，新集数优先；成功入队后只忽略非升级候选，保证 06v2 在后续刷新还能补下，旧文件不删除。
+- 播放器修正：全屏时用 `pointerenter/leave` 维护 `controlsHovered`，鼠标停在控制栏上不启动自动隐藏计时；控制栏顶部内边距 `pt-8` 恢复 `pt-4`，进度条容器改 `flex items-center` 去掉 input 继承的 24px 行高；窗口模式抽屉宽度改为 `min(880px, 76vw, max(560px, 80vh))`，视频以抽屉宽度铺满 16:9、没有左右黑边。
+
 ## 1.3.0 RSS 追番
 
 - 数据迁移 `009_rss.sql`：`rss_feeds`、`rss_follows`、`rss_entries`、`rss_matches`。订阅源和追番分开，同一个源可以建多个追番。

@@ -4,7 +4,11 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { SelectMenu } from "../../components/common/SelectMenu";
 import { SeriesCard } from "../../components/series/SeriesCard";
 import { seriesCoverUrl } from "../../lib/thumbnails";
-import type { SeriesSort, SeriesSummary } from "../../types/library";
+import type {
+  SeriesEpisodeIssues,
+  SeriesSort,
+  SeriesSummary,
+} from "../../types/library";
 
 const SORT_OPTIONS: { value: SeriesSort; label: string }[] = [
   { value: "name", label: "按名称" },
@@ -22,6 +26,7 @@ interface CategoryPageProps {
   sort: SeriesSort;
   badges: Record<number, number>;
   duplicateNames: Record<string, number>;
+  episodeIssues: Record<number, SeriesEpisodeIssues>;
   onSortChange: (sort: SeriesSort) => void;
   onOpenSeries: (series: SeriesSummary, coverRect: DOMRect | null) => void;
   onSeriesContextMenu: (
@@ -42,6 +47,7 @@ export function CategoryPage({
   sort,
   badges,
   duplicateNames,
+  episodeIssues,
   onSortChange,
   onOpenSeries,
   onSeriesContextMenu,
@@ -99,6 +105,7 @@ export function CategoryPage({
                 duplicateCount={
                   duplicateNames[item.name.trim().toLowerCase()] ?? 0
                 }
+                episodeIssues={episodeIssues[item.id]}
                 onContextMenu={(event) => onSeriesContextMenu(item, event)}
                 onOpen={(rect) => onOpenSeries(item, rect)}
               />

@@ -3,7 +3,10 @@ import { Loader2, Search } from "lucide-react";
 import { EmptyState } from "../../components/common/EmptyState";
 import { SeriesCard } from "../../components/series/SeriesCard";
 import { seriesCoverUrl } from "../../lib/thumbnails";
-import type { SearchItem } from "../../types/library";
+import type {
+  SearchItem,
+  SeriesEpisodeIssues,
+} from "../../types/library";
 
 interface SearchPageProps {
   query: string;
@@ -13,6 +16,7 @@ interface SearchPageProps {
   loadingMore: boolean;
   badges: Record<number, number>;
   duplicateNames: Record<string, number>;
+  episodeIssues: Record<number, SeriesEpisodeIssues>;
   onOpenSeries: (item: SearchItem, coverRect: DOMRect | null) => void;
   onSeriesContextMenu: (
     series: SearchItem,
@@ -29,6 +33,7 @@ export function SearchPage({
   loadingMore,
   badges,
   duplicateNames,
+  episodeIssues,
   onOpenSeries,
   onSeriesContextMenu,
   onLoadMore,
@@ -64,6 +69,7 @@ export function SearchPage({
                 duplicateCount={
                   duplicateNames[item.name.trim().toLowerCase()] ?? 0
                 }
+                episodeIssues={episodeIssues[item.id]}
                 subtitle={
                   item.matchPreview
                     ? `${item.category} · ${item.matchPreview}`

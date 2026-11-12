@@ -9,6 +9,11 @@ use quick_xml::{Reader, XmlVersion};
 use regex::Regex;
 use serde::Serialize;
 
+use crate::episode_names::{find_episode, parse_episode, version_number};
+
+// 版本号解析由文件名分析模块统一提供，RSS 匹配直接复用。
+pub use crate::episode_names::release_version;
+
 const USER_AGENT: &str = "KanFanOS/1.3 RSS";
 
 #[derive(Debug, Clone)]
@@ -472,6 +477,17 @@ pub fn release_group(title: &str) -> Option<String> {
     }
 }
 
+/// 比对字幕组用的归一化名称。
+pub fn normalized_group(value: &str) -> Option<String> {
+    let normalized = normalize(value);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// 归一化后的字幕组名，用于判断两个发布是否来自同一字幕组。
+pub fn release_group_key(title: &str) -> Option<String> {
+    release_group(title).and_then(|group| normalized_group(&group))
+}
+
 /// 返回字幕组在用户优先级列表中的位置；未命中或没有组信息时返回 `usize::MAX`。
 pub fn preferred_group_rank(preferred: &[String], title: &str) -> usize {
     let Some(group) = release_group(title) else {
@@ -741,65 +757,12 @@ where
     }
 }
 
-fn version_number(value: &str) -> Option<i64> {
-    static VERSION: OnceLock<Regex> = OnceLock::new();
-    let regex = VERSION.get_or_init(|| Regex::new(r"(?i)\bv(\d+)\b").unwrap());
-    regex
-        .captures_iter(value)
-        .filter_map(|captures| captures.get(1))
-        .filter_map(|capture| capture.as_str().parse::<i64>().ok())
-        .max()
-}
-
 fn normalize(value: &str) -> String {
     value
         .chars()
         .filter(|ch| ch.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn episode_patterns() -> &'static [Regex] {
-    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        [
-            r"(?i)(?:s\d{1,2}e|ep?)\s*0*(\d{1,3})(?:v\d+)?",
-            r"第\s*0*(\d{1,3})\s*[话話集]",
-            r"(?:^|[\s\[\]\(\)【】_-])0*(\d{1,3})(?:v\d+)?(?:v\d+)?(?:[\s\[\]\(\)【】]|$)",
-            r"[\[\(]\s*0*(\d{1,3})(?:v\d+)?\s*[\]\)]",
-        ]
-        .iter()
-        .filter_map(|pattern| Regex::new(pattern).ok())
-        .collect()
-    })
-}
-
-fn find_episode(title: &str) -> Option<(i64, usize)> {
-    for pattern in episode_patterns() {
-        for captures in pattern.captures_iter(title) {
-            let (Some(value), Some(full)) = (captures.get(1), captures.get(0)) else {
-                continue;
-            };
-            let Ok(episode) = value.as_str().parse::<i64>() else {
-                continue;
-            };
-            if !(1..=999).contains(&episode) {
-                continue;
-            }
-            // 720/480 这类数字通常是分辨率，不是集数。
-            if matches!(episode, 480 | 720 | 1080 | 2160)
-                && title[value.end()..].trim_start().starts_with('p')
-            {
-                continue;
-            }
-            return Some((episode, full.start()));
-        }
-    }
-    None
-}
-
-fn parse_episode(title: &str) -> Option<i64> {
-    find_episode(title).map(|(episode, _)| episode)
 }
 
 fn parse_resolution(title: &str) -> Option<String> {

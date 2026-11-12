@@ -28,6 +28,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   getSystemVolume,
   hidePlayerPreview,
+  listAudioOutputDevices,
   movePlayerPreview,
   onPlayerClosed,
   onPlayerClick,
@@ -37,12 +38,12 @@ import {
   playerPreviewFrame,
   playerSeek,
   playerSetAudio,
-  playerSetAudioDevice,
   playerSetPaused,
   playerSetSpeed,
   playerSetSubDelay,
   playerSetSubtitle,
   resizePlayer,
+  setAudioOutputDevice,
   setPlayerCursorVisible,
   setSystemMuted,
   setSystemVolume,
@@ -58,6 +59,7 @@ import type {
   PlayerState,
   SeriesSummary,
   SubtitleTrack,
+  SystemAudioDevice,
 } from "../../types/library";
 
 interface PlayerDrawerProps {
@@ -89,7 +91,6 @@ const CONTROLS_HIDE_DURATION_MS = 300;
 
 /** 自动连播是应用级偏好，不随番剧/集数重置。 */
 const AUTO_PLAY_NEXT_STORAGE_KEY = "kanfanos.player.autoPlayNext";
-const AUDIO_DEVICE_STORAGE_KEY = "kanfanos.player.audioDevice";
 const AUDIO_TRACK_STORAGE_KEY = "kanfanos.player.audioTrack";
 const SUBTITLE_PREFERENCE_STORAGE_KEY = "kanfanos.player.subtitle";
 const SPEED_STORAGE_KEY = "kanfanos.player.speed";
@@ -105,19 +106,6 @@ function readAutoPlayNextPreference(): boolean {
 }
 
 let autoPlayNextPreference = readAutoPlayNextPreference();
-
-function readAudioDevicePreference(): string | null {
-  try {
-    const value = window.localStorage
-      .getItem(AUDIO_DEVICE_STORAGE_KEY)
-      ?.trim();
-    return value || null;
-  } catch {
-    return null;
-  }
-}
-
-let audioDevicePreference = readAudioDevicePreference();
 
 function readStoredNumber(
   key: string,
@@ -350,10 +338,6 @@ export function PlayerDrawer({
   const [starting, setStarting] = useState(true);
   const [playerState, setPlayerState] = useState<PlayerState | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [audioNotice, setAudioNotice] = useState<{
-    text: string;
-    kind: "warning" | "success";
-  } | null>(null);
   const [seekPreview, setSeekPreview] = useState<number | null>(null);
   const [seekPreviewHover, setSeekPreviewHover] = useState<{
     key: string;
@@ -374,12 +358,16 @@ export function PlayerDrawer({
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [audioOutputMenuOpen, setAudioOutputMenuOpen] = useState(false);
+  // Windows 系统播放设备；音频输出菜单直接切换系统默认设备。
+  const [outputDevices, setOutputDevices] = useState<SystemAudioDevice[]>([]);
   // 字幕整体时间偏移；正数延后、负数提前。作为播放器偏好跨集保留。
   const [subtitleDelayMs, setSubtitleDelayMs] = useState(
     subtitleDelayPreference,
   );
   // 全屏时控制栏自动隐藏，鼠标移动时重新出现。
   const [controlsVisible, setControlsVisible] = useState(true);
+  // 鼠标停留在控制栏上时暂停自动隐藏，离开后重新开始计时。
+  const [controlsHovered, setControlsHovered] = useState(false);
   const [activityTick, setActivityTick] = useState(0);
   const [autoPlayNext, setAutoPlayNextState] = useState(autoPlayNextPreference);
 
@@ -415,12 +403,7 @@ export function PlayerDrawer({
     position: -1,
     since: 0,
     attempts: 0,
-  });  // 音频设备等真正的播放进度开始推进后再应用，避免 mpv 还在启动 seek 时切设备。
-  const audioProgressRef = useRef<{
-    episodeId: number;
-    position: number;
-  } | null>(null);  // 已应用音频设备偏好的集数，避免每集重复发送命令。
-  const appliedAudioDeviceRef = useRef<number | null>(null);
+  });
   const appliedPlaybackPrefsRef = useRef<number | null>(null);
   const playbackPrefsProgressRef = useRef<{
     episodeId: number;
@@ -437,9 +420,6 @@ export function PlayerDrawer({
     episodeId: number;
     position: number;
   } | null>(null);
-  // 当前集是否因为设备消失而回退到系统默认。
-  const audioFallbackRef = useRef(false);
-  const audioNoticeTimerRef = useRef<number | undefined>(undefined);
   const volumePreviewRef = useRef<number | null>(null);
   const latestVolumeRef = useRef(100);
   const volumeSendTimerRef = useRef<number | undefined>(undefined);
@@ -462,36 +442,17 @@ export function PlayerDrawer({
     setAudioOutputMenuOpen(false);
     setControlsVisible(false);
   }, []);
-  const clearAudioNotice = useCallback(() => {
-    if (audioNoticeTimerRef.current !== undefined) {
-      window.clearTimeout(audioNoticeTimerRef.current);
-      audioNoticeTimerRef.current = undefined;
+  const refreshOutputDevices = useCallback(async () => {
+    try {
+      setOutputDevices(await listAudioOutputDevices());
+    } catch {
+      // 系统音频接口不可用时保留当前列表。
     }
-    setAudioNotice(null);
   }, []);
 
-  const showAudioNotice = useCallback(
-    (text: string, kind: "warning" | "success") => {
-      if (audioNoticeTimerRef.current !== undefined) {
-        window.clearTimeout(audioNoticeTimerRef.current);
-      }
-      setAudioNotice({ text, kind });
-      audioNoticeTimerRef.current = window.setTimeout(() => {
-        audioNoticeTimerRef.current = undefined;
-        setAudioNotice(null);
-      }, 4500);
-    },
-    [],
-  );
-
-  useEffect(
-    () => () => {
-      if (audioNoticeTimerRef.current !== undefined) {
-        window.clearTimeout(audioNoticeTimerRef.current);
-      }
-    },
-    [],
-  );
+  useEffect(() => {
+    void refreshOutputDevices();
+  }, [refreshOutputDevices]);
 
   useEffect(
     () => () => {
@@ -700,70 +661,9 @@ export function PlayerDrawer({
   }, [episode.id]);
 
   useEffect(() => {
-    audioProgressRef.current = null;
     appliedSubtitleRef.current = null;
     subtitleProgressRef.current = null;
-    clearAudioNotice();
-  }, [episode.id, clearAudioNotice]);
-  // mpv 每次换集都是新进程；把上次选择的音频输出设备重新应用回去。
-  // 设备不可用时回退到 auto，但保留偏好，设备恢复后自动切回。
-  useEffect(() => {
-    if (!playerState || playerState.episodeId !== episode.id) return;
-    const preferred = audioDevicePreference;
-    if (!preferred || preferred === "auto") {
-      appliedAudioDeviceRef.current = episode.id;
-      audioFallbackRef.current = false;
-      return;
-    }
-    const devices = playerState.audioDevices;
-    if (devices.length === 0) return;
-    const present = devices.some((device) => device.name === preferred);
-
-    if (appliedAudioDeviceRef.current !== episode.id) {
-      const previous = audioProgressRef.current;
-      if (
-        !previous ||
-        previous.episodeId !== episode.id ||
-        Math.abs(playerState.positionMs - previous.position) < 250
-      ) {
-        audioProgressRef.current = {
-          episodeId: episode.id,
-          position: playerState.positionMs,
-        };
-        return;
-      }
-      audioProgressRef.current = {
-        episodeId: episode.id,
-        position: playerState.positionMs,
-      };
-      appliedAudioDeviceRef.current = episode.id;
-      if (present) {
-        audioFallbackRef.current = false;
-        void playerSetAudioDevice(preferred).catch(() => {});
-      } else {
-        audioFallbackRef.current = true;
-        void playerSetAudioDevice("auto").catch(() => {});
-        showAudioNotice(
-          `音频设备不可用，已回退系统默认：${preferred}`,
-          "warning",
-        );
-      }
-      return;
-    }
-
-    if (!present && !audioFallbackRef.current) {
-      audioFallbackRef.current = true;
-      void playerSetAudioDevice("auto").catch(() => {});
-      showAudioNotice(
-        `音频设备已断开，已回退系统默认：${preferred}`,
-        "warning",
-      );
-    } else if (present && audioFallbackRef.current) {
-      audioFallbackRef.current = false;
-      void playerSetAudioDevice(preferred).catch(() => {});
-      showAudioNotice(`音频设备已恢复：${preferred}`, "success");
-    }
-  }, [episode.id, playerState, showAudioNotice]);
+  }, [episode.id]);
 
   // 记住用户选过的字幕轨道；新一集用标题/语言重新匹配，不依赖会变化的 sid。
   useEffect(() => {
@@ -909,9 +809,11 @@ export function PlayerDrawer({
 
   // 全屏时鼠标静止 2.5 秒收起控制栏；窗口模式不自动收起。
   // 控制栏已经隐藏时不再因为暂停/播放等状态变化重新出现。
+  // 鼠标停留在控制栏上（或展开着菜单）时不自动隐藏，离开后再重新计时。
   useEffect(() => {
     if (!controlsVisible) return;
     if (!fullscreen) return;
+    if (controlsHovered) return;
 
     const timer = window.setTimeout(() => {
       if (!subtitleMenuOpen && !audioMenuOpen && !audioOutputMenuOpen) {
@@ -930,6 +832,7 @@ export function PlayerDrawer({
     audioMenuOpen,
     audioOutputMenuOpen,
     controlsVisible,
+    controlsHovered,
   ]);
 
   // 全屏收起控制栏时一并隐藏鼠标指针；重新出现或退出时恢复。
@@ -1050,15 +953,9 @@ export function PlayerDrawer({
     audioTracks.find((track) => track.id === audioId) ?? null;
   const audioLabel = currentAudio ? audioTrackLabel(currentAudio) : null;
   const hasAudio = audioTracks.length > 0;
-  const audioDevices = playerState?.audioDevices ?? [];
-  const audioDevice = playerState?.audioDevice ?? null;
-  const currentAudioDevice =
-    audioDevices.find((device) => device.name === audioDevice) ?? null;
-  const audioOutputLabel = currentAudioDevice
-    ? currentAudioDevice.description
-    : audioDevice === "auto" || audioDevice == null
-      ? "自动"
-      : audioDevice;
+  const currentOutputDevice =
+    outputDevices.find((device) => device.isDefault) ?? null;
+  const audioOutputLabel = currentOutputDevice?.name ?? "系统默认";
 
   const currentIndex = episodes.findIndex((item) => item.id === episode.id);
   const previous = currentIndex > 0 ? episodes[currentIndex - 1] : null;
@@ -1271,18 +1168,24 @@ export function PlayerDrawer({
     void playerSetAudio(id);
   };
 
-  const selectAudioDevice = (device: string) => {
-    audioDevicePreference = device;
-    audioFallbackRef.current = false;
-    try {
-      window.localStorage.setItem(AUDIO_DEVICE_STORAGE_KEY, device);
-    } catch {
-      // localStorage 不可用时只保留本次运行内的偏好。
-    }
-    appliedAudioDeviceRef.current = episode.id;
-    clearAudioNotice();
+  // 选择音频输出 = 切换 Windows 默认播放设备；音量条随后刷新为新设备的音量。
+  const selectAudioDevice = (deviceId: string) => {
     closeMenus();
-    void playerSetAudioDevice(device);
+    void setAudioOutputDevice(deviceId)
+      .then(async () => {
+        await refreshOutputDevices();
+        // 默认设备已切换，立即读取新设备的主音量。
+        try {
+          const value = await getSystemVolume();
+          if (volumePreviewRef.current !== null) return;
+          latestVolumeRef.current = value.level;
+          setSystemVolumeState(value.level);
+          setSystemMutedState(value.muted);
+        } catch {
+          // 忽略；后台轮询会继续同步。
+        }
+      })
+      .catch((err) => setError(errorMessage(err)));
   };
 
   const commitSystemVolume = () => {
@@ -1373,10 +1276,15 @@ export function PlayerDrawer({
   };
 
   const toggleAudioOutputMenu = () => {
-    if (!playerState || audioDevices.length === 0) return;
+    if (!playerState || outputDevices.length === 0) return;
     setSubtitleMenuOpen(false);
     setAudioMenuOpen(false);
-    setAudioOutputMenuOpen((open) => !open);
+    setAudioOutputMenuOpen((open) => {
+      const next = !open;
+      // 展开时重新枚举，系统里插拔/切换过的设备能及时反映出来。
+      if (next) void refreshOutputDevices();
+      return next;
+    });
   };
 
   // 播放器回报的位置接近目标后，进度条才恢复跟随实时进度。
@@ -1681,7 +1589,10 @@ export function PlayerDrawer({
         className={`fixed right-0 top-0 z-50 flex h-full max-w-full flex-col bg-neutral-950 shadow-2xl transition-[translate,transform] duration-300 ease-out ${
           fullscreen
             ? "w-screen border-l-0"
-            : "w-[min(880px,76vw)] border-l border-neutral-800"
+            : // 窗口模式抽屉宽度跟随画面：80vh 宽正好让 16:9 视频高度为 45vh，
+              // 视频满宽显示、没有左右黑边，同时给下方剧集列表留出空间。
+              // max(560px, 80vh) 保证矮窗口下控制栏仍有足够宽度。
+              "w-[min(880px,76vw,max(560px,80vh))] border-l border-neutral-800"
         } ${open && !closing ? "translate-x-0" : "translate-x-full"}`}
       >
         <div
@@ -1721,7 +1632,11 @@ export function PlayerDrawer({
             if (fullscreen) hideControls();
           }}
           className={`relative w-full bg-black ${
-            fullscreen ? "min-h-0 flex-1" : "aspect-video shrink-0"
+            fullscreen
+              ? "min-h-0 flex-1"
+              : // 窗口模式视频满宽 16:9，画面填满容器、没有黑边；
+                // 高度通过抽屉宽度控制（见上方宽度的 80vh 约束）。
+                "aspect-video shrink-0"
           }`}
         >
           {!error && (!playerState || starting) && (
@@ -1737,28 +1652,11 @@ export function PlayerDrawer({
             {error}
           </div>
         )}
-        {audioNotice && (
-          <div
-            className={`flex shrink-0 items-center justify-between gap-3 border-b px-4 py-1.5 text-[11px] ${
-              audioNotice.kind === "success"
-                ? "border-emerald-900/60 bg-emerald-950/40 text-emerald-200"
-                : "border-amber-900/60 bg-amber-950/40 text-amber-200"
-            }`}
-          >
-            <span className="min-w-0 truncate">{audioNotice.text}</span>
-            <button
-              type="button"
-              onClick={clearAudioNotice}
-              className="shrink-0 rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
-              aria-label="关闭音频设备提示"
-            >
-              <X size={12} />
-            </button>
-          </div>
-        )}
 
         <div
           ref={controlsRef}
+          onPointerEnter={() => setControlsHovered(true)}
+          onPointerLeave={() => setControlsHovered(false)}
           className={`player-controls grid shrink-0 transition-[grid-template-rows] ease-out ${
             !controlsVisible ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
           }`}
@@ -1770,7 +1668,7 @@ export function PlayerDrawer({
             }`}
           >
             <div
-              className={`border-b border-neutral-800 bg-neutral-900/60 px-4 pb-3 pt-8 transition-opacity ease-out ${
+              className={`border-b border-neutral-800 bg-neutral-900/60 px-4 pb-3 pt-4 transition-opacity ease-out ${
                 !controlsVisible ? "opacity-0" : "opacity-100"
               }`}
               style={{ transitionDuration: `${CONTROLS_HIDE_DURATION_MS}ms` }}
@@ -1899,20 +1797,17 @@ export function PlayerDrawer({
                         音频输出
                       </span>
 
-                      {audioDevices.length === 0 ? (
+                      {outputDevices.length === 0 ? (
                         <span className="text-xs text-neutral-500">
                           没有检测到可用的音频输出设备
                         </span>
                       ) : (
-                        audioDevices.map((device) => (
+                        outputDevices.map((device) => (
                           <TrackChip
-                            key={device.name}
-                            label={device.description || device.name}
-                            selected={
-                              device.name === audioDevice ||
-                              (audioDevice == null && device.name === "auto")
-                            }
-                            onClick={() => selectAudioDevice(device.name)}
+                            key={device.id}
+                            label={device.name}
+                            selected={device.isDefault}
+                            onClick={() => selectAudioDevice(device.id)}
                           />
                         ))
                       )}
@@ -1933,14 +1828,15 @@ export function PlayerDrawer({
                 <span className="w-14 text-right text-[11px] tabular-nums text-neutral-400">
                   {formatTime(positionMs)}
                 </span>
+                {/* flex 消除 input 的行盒（line-height 会把这一行撑高）。 */}
                 <div
-                  className="relative flex-1"
+                  className="relative flex flex-1 items-center"
                   onPointerMove={showSeekPreview}
                   onPointerLeave={hideSeekPreview}
                 >
                   {seekPreviewHover && (
                     <div
-                      className="pointer-events-none absolute z-20 -translate-x-1/2 rounded bg-black/80 px-1.5 py-0.5 text-[10px] tabular-nums text-white shadow-lg"
+                      className="pointer-events-none absolute z-20 -translate-x-1/2 rounded bg-black/80 px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-white shadow-lg"
                       style={{
                         left: `${seekPreviewHover.timeRatio * 100}%`,
                         bottom: "calc(100% + 2px)",
@@ -1975,7 +1871,7 @@ export function PlayerDrawer({
                 </span>
               </div>
 
-              <div className="mt-3 flex items-center gap-1.5">
+              <div className="mt-3 flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => previous && onSelectEpisode(previous)}
@@ -2012,7 +1908,7 @@ export function PlayerDrawer({
 
                 <label
                   title="当前集播放结束后自动播放下一集；最后一集播放完会停止"
-                  className="ml-1 flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                  className="ml-1 flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 py-1 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
                 >
                   <input
                     type="checkbox"
@@ -2047,7 +1943,7 @@ export function PlayerDrawer({
                   onPointerCancel={commitSystemVolume}
                   onKeyUp={commitSystemVolume}
                   disabled={!playerState}
-                  className="h-1 w-24 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
+                  className="h-1 w-20 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
                   title="系统音量"
                 />
                 <span className="w-8 text-[11px] tabular-nums text-neutral-500">
@@ -2092,16 +1988,16 @@ export function PlayerDrawer({
                   <button
                     type="button"
                     onClick={toggleAudioOutputMenu}
-                    disabled={!playerState || audioDevices.length === 0}
+                    disabled={!playerState || outputDevices.length === 0}
                     className={`${iconButton} ${
                       audioOutputMenuOpen
                         ? "bg-neutral-800 text-white"
                         : ""
                     }`}
                     title={
-                      audioDevices.length > 0
-                        ? `音频输出（当前：${audioOutputLabel}）`
-                        : "音频输出"
+                      outputDevices.length > 0
+                        ? `系统音频输出（当前：${audioOutputLabel}）`
+                        : "系统音频输出"
                     }
                   >
                     <Speaker size={16} />

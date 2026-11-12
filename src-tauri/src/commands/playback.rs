@@ -229,6 +229,30 @@ pub fn player_set_audio_device(
     .map_err(to_message)
 }
 
+/// 系统播放设备列表；音频输出菜单直接使用它，不再显示 mpv 的 auto 项。
+#[tauri::command(async)]
+pub fn list_audio_output_devices(
+) -> Result<Vec<crate::system_audio::OutputDevice>, String> {
+    crate::system_audio::list_devices().map_err(to_message)
+}
+
+/// 把系统默认播放设备切换到指定端点，并让正在播放的 mpv 立即跟随。
+#[tauri::command(async)]
+pub fn set_audio_output_device(
+    app: AppHandle,
+    device_id: String,
+) -> Result<(), String> {
+    crate::system_audio::set_default_device(&device_id).map_err(to_message)?;
+
+    // 播放器没启动时忽略；下次启动会直接使用新的系统默认设备。
+    let device = crate::system_audio::mpv_device_name(&device_id);
+    let _ = playback::send(
+        &app,
+        json!({ "command": ["set_property", "audio-device", device] }),
+    );
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_recent(
     state: State<'_, AppState>,

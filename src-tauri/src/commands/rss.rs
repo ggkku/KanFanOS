@@ -1,7 +1,6 @@
 //! RSS 追番命令：订阅源、追番规则、抓取匹配和自动下载。
 
 use std::{
-    cmp::Reverse,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -621,33 +620,88 @@ async fn refresh_feed(app: &AppHandle, feed_id: i64) -> AnyResult<RssRefreshResu
     })
 }
 
-/// 自动下载只处理每个追番当前最新的一集；更旧的 pending 直接忽略。
+/// 已入队记录里每集的最高版本和出现过的字幕组。
+fn queued_state(
+    titles: &[(i64, String)],
+) -> (HashMap<i64, i64>, HashMap<i64, HashSet<String>>) {
+    let mut versions: HashMap<i64, i64> = HashMap::new();
+    let mut groups: HashMap<i64, HashSet<String>> = HashMap::new();
+    for (episode, title) in titles {
+        let version = rss::release_version(title);
+        versions
+            .entry(*episode)
+            .and_modify(|current| *current = (*current).max(version))
+            .or_insert(version);
+        if let Some(group) = rss::release_group_key(title) {
+            groups.entry(*episode).or_default().insert(group);
+        }
+    }
+    (versions, groups)
+}
+
+/// 选出本轮要下载的一条匹配。
+///
+/// - 新集数：集数大于 `last_episode`；
+/// - 同集新版本：该集已经入队过，版本号更高，且（有组信息时）来自同一字幕组。
+///
+/// 多集同时可用时优先下载集数更大的；同一集再比版本、置信度和发布时间。
+/// 限定组/封装方式没有对应版本时保持等待，不回退到其它组。
 fn select_latest_candidate<'a>(
     pending: &'a [RssMatch],
     limited_groups: &[String],
     subtitle_packaging: &str,
     last_episode: i64,
+    queued_titles: &[(i64, String)],
 ) -> Option<&'a RssMatch> {
+    let (queued_versions, queued_groups) = queued_state(queued_titles);
+
     let eligible: Vec<&RssMatch> = pending
         .iter()
-        .filter(|item| {
-            item.episode
-                .is_some_and(|episode| episode > last_episode)
-                && item.confidence >= 70
-        })
+        .filter(|item| item.confidence >= 70)
         .filter(|item| {
             limited_groups.is_empty()
                 || rss::preferred_group_rank(limited_groups, &item.entry_title) != usize::MAX
         })
         .filter(|item| rss::subtitle_packaging_matches(subtitle_packaging, &item.entry_title))
-        .collect();
-    let latest_episode = eligible.iter().filter_map(|item| item.episode).max()?;
+        .filter(|item| {
+            let Some(episode) = item.episode else {
+                return false;
+            };
+            if episode > last_episode {
+                return true;
+            }
 
-    // 限定组/封装方式没有这一集时保持等待，不回退到其它组。
-    eligible
-        .into_iter()
-        .filter(|item| item.episode == Some(latest_episode))
-        .min_by_key(|item| (Reverse(item.confidence), Reverse(item.published_at)))
+            // 同集新版本：必须有入队记录，版本更高。
+            let Some(&queued_version) = queued_versions.get(&episode) else {
+                return false;
+            };
+            if rss::release_version(&item.entry_title) <= queued_version {
+                return false;
+            }
+
+            // 有字幕组信息时要求与已入队的同一集出自同一组；
+            // 任一侧无法识别字幕组时退回只比较版本号。
+            let candidate_group = item
+                .release_group
+                .as_deref()
+                .and_then(rss::normalized_group);
+            match (candidate_group, queued_groups.get(&episode)) {
+                (Some(group), Some(queued)) if !queued.is_empty() => {
+                    queued.contains(&group)
+                }
+                _ => true,
+            }
+        })
+        .collect();
+
+    eligible.into_iter().max_by_key(|item| {
+        (
+            item.episode.unwrap_or(0),
+            rss::release_version(&item.entry_title),
+            item.confidence,
+            item.published_at,
+        )
+    })
 }
 
 async fn auto_download_latest(app: &AppHandle) -> usize {
@@ -667,11 +721,16 @@ async fn auto_download_latest(app: &AppHandle) -> usize {
             Err(_) => continue,
         };
         let last = follow.last_episode.unwrap_or(0);
+        let queued_titles = state
+            .db
+            .queued_episode_titles(follow.id)
+            .unwrap_or_default();
         let Some(candidate) = select_latest_candidate(
             &pending,
             &follow.preferred_groups,
             &follow.subtitle_packaging,
             last,
+            &queued_titles,
         ) else {
             continue;
         };
@@ -679,11 +738,22 @@ async fn auto_download_latest(app: &AppHandle) -> usize {
 
         match queue_download(app, candidate, &follow, true).await {
             Ok(()) => {
-                // 既然只补最新一集，下载成功后再把旧集从待确认里清掉。
+                // 旧集从待确认里清掉，但同集更高版本的候选要留着，
+                // 下一轮刷新继续下载（例如先下了 07，再补 06v2）。
+                let (queued_versions, _) = queued_state(&queued_titles);
                 for item in pending.iter().filter(|item| {
                     item.id != candidate.id
                         && item.episode.is_some_and(|episode| episode < candidate_episode)
                 }) {
+                    let keep_upgrade = item
+                        .episode
+                        .and_then(|episode| queued_versions.get(&episode))
+                        .is_some_and(|queued| {
+                            rss::release_version(&item.entry_title) > *queued
+                        });
+                    if keep_upgrade {
+                        continue;
+                    }
                     let _ = state
                         .db
                         .set_rss_match_status(item.id, "ignored", None, now_ms());
@@ -798,8 +868,8 @@ mod tests {
             follow_id: 1,
             follow_title: "测试番".to_string(),
             entry_title: title.to_string(),
-            release_group: None,
-            subtitle_packaging: None,
+            release_group: crate::rss::release_group(title),
+            subtitle_packaging: crate::rss::release_subtitle_packaging(title),
             link: String::new(),
             download_url: String::new(),
             published_at,
@@ -819,17 +889,17 @@ mod tests {
         let pending = vec![ani, black];
 
         assert_eq!(
-            select_latest_candidate(&pending, &[], "", 3).map(|item| item.id),
+            select_latest_candidate(&pending, &[], "", 3, &[]).map(|item| item.id),
             Some(1)
         );
         assert_eq!(
-            select_latest_candidate(&pending, &["黒ネズミたち".to_string()], "", 3)
+            select_latest_candidate(&pending, &["黒ネズミたち".to_string()], "", 3, &[])
                 .map(|item| item.id),
             Some(2)
         );
         // 限定组没有这一集时保持等待，不回退到其它组。
         assert_eq!(
-            select_latest_candidate(&pending, &["不存在的组".to_string()], "", 3)
+            select_latest_candidate(&pending, &["不存在的组".to_string()], "", 3, &[])
                 .map(|item| item.id),
             None
         );
@@ -842,8 +912,61 @@ mod tests {
         let pending = vec![ani, black];
 
         assert_eq!(
-            select_latest_candidate(&pending, &["黒ネズミたち".to_string()], "", 2)
+            select_latest_candidate(&pending, &["黒ネズミたち".to_string()], "", 2, &[])
                 .map(|item| item.id),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn downloads_higher_version_of_an_already_queued_episode() {
+        let queued = vec![(4, "[ANi] 测试番 - 04 [1080P]".to_string())];
+
+        let same_group_v2 = item(1, "[ANi] 测试番 - 04v2 [1080P]", 4, 100, 2);
+        assert_eq!(
+            select_latest_candidate(&[same_group_v2], &[], "", 4, &queued)
+                .map(|item| item.id),
+            Some(1)
+        );
+
+        // 同集、同版本不会重复下载。
+        let same_version = item(2, "[ANi] 测试番 - 04 [1080P]", 4, 100, 2);
+        assert_eq!(
+            select_latest_candidate(&[same_version], &[], "", 4, &queued)
+                .map(|item| item.id),
+            None
+        );
+
+        // 不同字幕组的同集 v2 不算版本更新。
+        let other_group_v2 = item(3, "[黒ネズミたち] 测试番 - 04v2 [1080P]", 4, 100, 2);
+        assert_eq!(
+            select_latest_candidate(&[other_group_v2], &[], "", 4, &queued)
+                .map(|item| item.id),
+            None
+        );
+
+        // 同集还没有入队记录时不算更新，避免重复下载同一集。
+        assert_eq!(
+            select_latest_candidate(
+                &[item(4, "[ANi] 测试番 - 04v2 [1080P]", 4, 100, 2)],
+                &[],
+                "",
+                4,
+                &[]
+            )
+            .map(|item| item.id),
+            None
+        );
+    }
+
+    #[test]
+    fn newer_episode_wins_over_version_update() {
+        let queued = vec![(4, "[ANi] 测试番 - 04 [1080P]".to_string())];
+        let v2 = item(1, "[ANi] 测试番 - 04v2 [1080P]", 4, 100, 2);
+        let next = item(2, "[ANi] 测试番 - 05 [1080P]", 5, 100, 3);
+
+        assert_eq!(
+            select_latest_candidate(&[v2, next], &[], "", 4, &queued).map(|item| item.id),
             Some(2)
         );
     }
@@ -868,11 +991,11 @@ mod tests {
         let groups = ["ANi".to_string()];
 
         assert_eq!(
-            select_latest_candidate(&pending, &groups, "简繁日内封", 3).map(|item| item.id),
+            select_latest_candidate(&pending, &groups, "简繁日内封", 3, &[]).map(|item| item.id),
             Some(1)
         );
         assert_eq!(
-            select_latest_candidate(&pending, &groups, "外挂", 3).map(|item| item.id),
+            select_latest_candidate(&pending, &groups, "外挂", 3, &[]).map(|item| item.id),
             None
         );
     }

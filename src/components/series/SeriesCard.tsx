@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
-import { AlertTriangle, Trophy } from "lucide-react";
+import { AlertTriangle, Copy, Trophy } from "lucide-react";
 import { getSeriesAwards } from "../../api/library";
-import type { SeriesSummary } from "../../types/library";
+import type { SeriesEpisodeIssues, SeriesSummary } from "../../types/library";
 import {
   RATING_LABELS,
   ratingColor,
@@ -15,6 +15,8 @@ interface SeriesCardProps {
   subtitle?: string | null;
   unwatchedCount?: number;
   duplicateCount?: number;
+  /// 文件名分析出的重复集数/中间缺集；与追番和自动下载无关。
+  episodeIssues?: SeriesEpisodeIssues;
   onContextMenu?: (
     event: MouseEvent<HTMLButtonElement>,
     series: SeriesSummary,
@@ -29,9 +31,19 @@ export function SeriesCard({
   subtitle,
   unwatchedCount = 0,
   duplicateCount = 0,
+  episodeIssues,
   onContextMenu,
   onOpen,
 }: SeriesCardProps) {
+  const duplicateEpisodes = episodeIssues?.duplicateEpisodes ?? [];
+  const missingEpisodes = episodeIssues?.missingEpisodes ?? [];
+  const duplicateTitle = duplicateEpisodes
+    .map(
+      (item) =>
+        `第 ${item.episode} 集有 ${item.files.length} 个文件：${item.files.join("、")}`,
+    )
+    .join("\n");
+  const missingTitle = `缺少第 ${missingEpisodes.join("、")} 集`;
   const [imageFailed, setImageFailed] = useState(false);
   const [awards, setAwards] = useState<string[]>([]);
   const [awardsLoaded, setAwardsLoaded] = useState(false);
@@ -102,7 +114,10 @@ export function SeriesCard({
           </div>
         )}
 
-        {(unwatchedCount > 0 || duplicateCount > 1) && (
+        {(unwatchedCount > 0 ||
+          duplicateCount > 1 ||
+          duplicateEpisodes.length > 0 ||
+          missingEpisodes.length > 0) && (
           <div className="absolute left-2 top-2 flex flex-col items-start gap-1">
             {unwatchedCount > 0 && (
               <span
@@ -119,6 +134,24 @@ export function SeriesCard({
               >
                 <AlertTriangle size={10} />
                 同名 {duplicateCount}
+              </span>
+            )}
+            {duplicateEpisodes.length > 0 && (
+              <span
+                title={duplicateTitle}
+                className="inline-flex items-center gap-1 rounded-md bg-orange-500/90 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm"
+              >
+                <Copy size={10} />
+                重复 {duplicateEpisodes.length}
+              </span>
+            )}
+            {missingEpisodes.length > 0 && (
+              <span
+                title={missingTitle}
+                className="inline-flex items-center gap-1 rounded-md bg-amber-500/90 px-1.5 py-0.5 text-[10px] font-medium text-neutral-950 shadow-sm"
+              >
+                <AlertTriangle size={10} />
+                缺 {missingEpisodes.length} 集
               </span>
             )}
           </div>

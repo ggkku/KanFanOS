@@ -31,6 +31,7 @@ import {
   listExtraEpisodes,
   listRecent,
   listSeries,
+  listSeriesEpisodeIssues,
   onLibrarySync,
   onMediaProgress,
   onScanProgress,
@@ -52,6 +53,7 @@ import type {
   RecentPlaybackHint,
   ScanProgress,
   SearchItem,
+  SeriesEpisodeIssues,
   SeriesSort,
   SeriesSummary,
   SeriesTransition,
@@ -132,6 +134,10 @@ function App() {
   const [rssBadges, setRssBadges] = useState<Record<number, number>>({});
   const [duplicateSeriesNames, setDuplicateSeriesNames] = useState<
     Record<string, number>
+  >({});
+  // 集数完整性（重复/中间缺集）按番剧汇总，与追番和自动下载无关。
+  const [episodeIssues, setEpisodeIssues] = useState<
+    Record<number, SeriesEpisodeIssues>
   >({});
   const [loadingMore, setLoadingMore] = useState(false);
   const [sort, setSort] = useState<SeriesSort>("name");
@@ -427,6 +433,37 @@ function App() {
       });
     return () => {
       disposed = true;
+    };
+  }, [settings?.libraryId, refreshKey]);
+
+  // 集数完整性警告：只依赖媒体库里的文件名，和追番/自动下载无关。
+  useEffect(() => {
+    const libraryId = settings?.libraryId;
+    if (libraryId == null) {
+      setEpisodeIssues({});
+      return;
+    }
+    let disposed = false;
+    const load = () => {
+      listSeriesEpisodeIssues(libraryId)
+        .then((items) => {
+          if (disposed) return;
+          setEpisodeIssues(
+            Object.fromEntries(items.map((item) => [item.seriesId, item])),
+          );
+        })
+        .catch(() => {
+          if (!disposed) setEpisodeIssues({});
+        });
+    };
+    void load();
+    const timer = window.setInterval(load, 30000);
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
     };
   }, [settings?.libraryId, refreshKey]);
 
@@ -1159,6 +1196,7 @@ function App() {
         loadingMore={searchLoadingMore}
         badges={rssBadges}
         duplicateNames={duplicateSeriesNames}
+        episodeIssues={episodeIssues}
         onSeriesContextMenu={(series, event) =>
           setSeriesContextMenu({
             series,
@@ -1215,6 +1253,7 @@ function App() {
         sort={sort}
         badges={rssBadges}
         duplicateNames={duplicateSeriesNames}
+        episodeIssues={episodeIssues}
         onSeriesContextMenu={(series, event) =>
           setSeriesContextMenu({
             series,

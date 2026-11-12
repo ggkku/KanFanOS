@@ -1,6 +1,6 @@
 [package]
 name = "kanfanos"
-version = "1.3.4"
+version = "1.3.5"
 description = "KanFanOS - 本地视频媒体库"
 authors = ["you"]
 edition = "2024"
@@ -33,17 +33,23 @@ dunce = "1.0.5"
 tauri-plugin-dialog = "2.8.3"
 notify = "8.2.0"
 windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    "Win32_System_Variant",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# windows-interface 宏展开会引用 ::windows_core，需要直接依赖。
+windows-core = "0.62"
 toml = "1.1.8"
 # qBittorrent WebUI API；cookie_store 用来保存登录后的 SID。
 reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "charset", "system-proxy", "multipart"] }

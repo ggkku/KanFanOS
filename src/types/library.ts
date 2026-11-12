@@ -156,6 +156,22 @@ export interface EpisodeSummary {
   thumbnailKey: string | null;
   lastPositionMs: number | null;
   completed: boolean;
+  /// 从文件名解析出的集数；解析不到时为 null。
+  episodeNumber: number | null;
+  /// 发布版本号（06v2 → 2），没有版本标记时为 1。
+  episodeVersion: number;
+}
+
+export interface DuplicateEpisode {
+  episode: number;
+  files: string[];
+}
+
+/** 番剧的集数完整性分析结果；与追番/自动下载无关。 */
+export interface SeriesEpisodeIssues {
+  seriesId: number;
+  duplicateEpisodes: DuplicateEpisode[];
+  missingEpisodes: number[];
 }
 
 export interface RecentItem {
@@ -200,6 +216,13 @@ export interface AudioTrack {
 export interface AudioDevice {
   name: string;
   description: string;
+}
+
+/** Windows 系统播放设备（音频输出菜单直接切换系统默认设备）。 */
+export interface SystemAudioDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
 }
 
 export interface PlayerState {

@@ -3,6 +3,7 @@ mod browser;
 mod catalog;
 mod commands;
 mod database;
+mod episode_names;
 mod media;
 mod autostart;
 mod paths;
@@ -13,6 +14,7 @@ mod scanner;
 mod series_config;
 mod settings;
 mod state;
+mod system_audio;
 mod system_volume;
 mod time;
 mod tools;
@@ -237,6 +239,7 @@ pub fn run() {
             commands::catalog::search_series,
             commands::catalog::list_episodes,
             commands::catalog::list_extra_episodes,
+            commands::catalog::series_episode_issues,
             commands::history::mark_series_watched,
             commands::history::clear_series_history,
             commands::history::set_series_watch_count,
@@ -264,6 +267,8 @@ pub fn run() {
             commands::playback::player_set_sub_delay,
             commands::playback::player_set_audio,
             commands::playback::player_set_audio_device,
+            commands::playback::list_audio_output_devices,
+            commands::playback::set_audio_output_device,
             commands::playback::player_preview_frame,
             commands::playback::get_system_volume,
             commands::playback::set_system_volume,

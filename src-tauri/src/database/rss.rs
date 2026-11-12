@@ -356,6 +356,25 @@ impl Database {
         Ok(matches)
     }
 
+    /// 已入队的集数及其发布标题，用于判断同集是否出现了更高版本。
+    pub fn queued_episode_titles(&self, follow_id: i64) -> Result<Vec<(i64, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT m.episode, e.title
+               FROM rss_matches m
+               JOIN rss_entries e ON e.id = m.entry_id
+              WHERE m.follow_id = ?1
+                AND m.status = 'queued'
+                AND m.episode IS NOT NULL
+              ORDER BY m.episode ASC, m.updated_at DESC",
+        )?;
+        let rows = stmt.query_map([follow_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn recent_rss_matches(&self, limit: i64) -> Result<Vec<RssMatch>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

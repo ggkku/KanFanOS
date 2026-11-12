@@ -33,7 +33,9 @@ import type {
   SeriesSort,
   SeriesSummary,
   SeriesVideo,
+  SeriesEpisodeIssues,
   SyncEvent,
+  SystemAudioDevice,
 } from "../types/library";
 
 export function getLibraryStats(): Promise<LibraryStats> {
@@ -165,6 +167,13 @@ export function listExtraEpisodes(
   seriesId: number,
 ): Promise<EpisodeSummary[]> {
   return invoke<EpisodeSummary[]>("list_extra_episodes", { seriesId });
+}
+
+/** 按文件名分析整个媒体库的重复集数与中间缺集。 */
+export function listSeriesEpisodeIssues(
+  libraryId: number,
+): Promise<SeriesEpisodeIssues[]> {
+  return invoke<SeriesEpisodeIssues[]>("series_episode_issues", { libraryId });
 }
 
 export function markSeriesWatched(seriesId: number): Promise<number> {
@@ -346,6 +355,15 @@ export function playerSetAudio(audioId: number): Promise<void> {
 
 export function playerSetAudioDevice(device: string): Promise<void> {
   return invoke<void>("player_set_audio_device", { device });
+}
+
+export function listAudioOutputDevices(): Promise<SystemAudioDevice[]> {
+  return invoke<SystemAudioDevice[]>("list_audio_output_devices");
+}
+
+/** 切换系统默认播放设备，并让正在播放的 mpv 跟随。 */
+export function setAudioOutputDevice(deviceId: string): Promise<void> {
+  return invoke<void>("set_audio_output_device", { deviceId });
 }
 
 export interface SystemVolume {

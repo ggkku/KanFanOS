@@ -102,6 +102,10 @@ pub struct EpisodeSummary {
     pub thumbnail_key: Option<String>,
     pub last_position_ms: Option<i64>,
     pub completed: bool,
+    /// 从文件名解析出的集数；解析不到时为 `None`。
+    pub episode_number: Option<i64>,
+    /// 发布版本号（06v2 → 2），没有版本标记时为 1。
+    pub episode_version: i64,
 }
 
 const SERIES_SELECT: &str = "
@@ -302,6 +306,31 @@ impl Database {
         )?;
         let rows = stmt.query_map([library_id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// 媒体库中所有番剧的「选集」视频文件名，用于集数完整性分析。
+    /// 只统计番剧配置里被选为选集的视频（自动/手动模式都一样），
+    /// 「其它视频」不参与重复/缺集统计。
+    pub fn library_main_video_filenames(
+        &self,
+        library_id: i64,
+    ) -> Result<Vec<(i64, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT v.series_id, v.filename
+               FROM videos v
+               JOIN series s ON s.id = v.series_id
+              WHERE s.library_id = ?1
+                AND v.status <> 'missing'
+                AND v.kind = 'main'
+                AND v.series_id IS NOT NULL
+              ORDER BY v.series_id, v.filename COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([library_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -679,9 +708,14 @@ impl Database {
         )?;
 
         let rows = stmt.query_map(params![series_id, kind], |row| {
+            let filename: String = row.get(1)?;
             Ok(EpisodeSummary {
                 id: row.get(0)?,
-                filename: row.get(1)?,
+                episode_number: crate::episode_names::parse_episode_from_filename(&filename),
+                episode_version: crate::episode_names::release_version_from_filename(
+                    &filename,
+                ),
+                filename,
                 path: row.get(2)?,
                 file_size: row.get(3)?,
                 duration_ms: row.get(4)?,
