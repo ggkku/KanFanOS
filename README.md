@@ -4,7 +4,7 @@
 
 技术栈：Tauri 2 + React + TypeScript + Tailwind CSS + Rust + SQLite。
 
-完整设计见 [KanFanOS.md](./KanFanOS.md)，环境配置见 [docs/SETUP.md](./docs/SETUP.md)，开发过程中踩过的坑与实现约定见 [docs/DEV-NOTES.md](./docs/DEV-NOTES.md)。
+完整设计见 [KanFanOS.md](./KanFanOS.md)，环境配置见 [docs/SETUP.md](./docs/SETUP.md)，开发过程中踩过的坑与实现约定见 [docs/DEV-NOTES.md](./docs/DEV-NOTES.md)，历次发布的更新记录见 [docs/RELEASE-HISTORY.md](./docs/RELEASE-HISTORY.md)。
 
 ## 开发
 
