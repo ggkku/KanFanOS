@@ -24,8 +24,17 @@ fn episode_patterns() -> &'static [Regex] {
 }
 
 /// 找到标题里的第一个集数，返回 (集数, 匹配起点)。
+///
+/// - `Season 2`、`Part 2` 里的数字是季/部编号，直接跳过；
+/// - 标题里有 ` - ` 分隔符时，优先取分隔符之后的数字。季号通常写在
+///   标题部分（`某番 2 - 06`、`某番 / Show 2 - 06`），集数在分隔符后面。
 pub fn find_episode(title: &str) -> Option<(i64, usize)> {
-    for pattern in episode_patterns() {
+    let hyphen = title.find(" - ");
+    for (index, pattern) in episode_patterns().iter().enumerate() {
+        // 只对「任意位置的数字」规则启用；SxxExx、第 N 话本身就是明确标记。
+        let prefer_after = if index == 2 { hyphen } else { None };
+        let mut fallback = None;
+
         for captures in pattern.captures_iter(title) {
             let (Some(value), Some(full)) = (captures.get(1), captures.get(0)) else {
                 continue;
@@ -36,16 +45,53 @@ pub fn find_episode(title: &str) -> Option<(i64, usize)> {
             if !(1..=999).contains(&episode) {
                 continue;
             }
-            // 720/480 这类数字通常是分辨率，不是集数。
+            // `Season 2`、`Part 2` 里的数字是季/部编号，不是集数。
+            if is_season_marker(title, value.start()) {
+                continue;
+            }
+            // 720/480 这类数字通常是分辨率，不是集数；`720P` 也按分辨率处理。
             if matches!(episode, 480 | 720 | 1080 | 2160)
-                && title[value.end()..].trim_start().starts_with('p')
+                && title[value.end()..]
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.eq_ignore_ascii_case(&'p'))
             {
                 continue;
             }
-            return Some((episode, full.start()));
+
+            let found = (episode, full.start());
+            if let Some(cut) = prefer_after {
+                if value.start() > cut {
+                    return Some(found);
+                }
+                fallback.get_or_insert(found);
+            } else {
+                return Some(found);
+            }
+        }
+
+        if let Some(found) = fallback {
+            return Some(found);
         }
     }
     None
+}
+
+/// 数字紧跟在 `Season` / `Part` / `Cour` / `Volume` 后面时，它是季/部编号。
+///
+/// 例如 `[ANi] 戀上換裝娃娃 Season 2 - 24 [...]`：如果从前往后找数字，
+/// 会先选中季号 2，导致第 13–24 集全部被当成第 2 集。
+fn is_season_marker(title: &str, digits_start: usize) -> bool {
+    let prefix = title[..digits_start].trim_end();
+    let word = prefix
+        .rsplit(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "season" | "part" | "cour" | "cours" | "volume" | "vol"
+    )
 }
 
 pub fn parse_episode(title: &str) -> Option<i64> {
@@ -104,25 +150,40 @@ pub struct EpisodeIssues {
 ///
 /// 只传入番剧配置里被选为「选集」的视频（自动/手动模式不限）；
 /// 「其它视频」的编号不参与统计：
-/// - 重复：同一集出现多个文件（包括 06 和 06v2）；
+/// - 重复：同一集的同一版本出现多个文件。同一集的不同版本（06 与 06v2）
+///   不算重复：自动下载会保留旧版本，它们是同一集的新旧发布；
 /// - 缺集：只检查最小集数和最大集数之间，首尾之外的缺失不算，
 ///   因为第二季可能直接从 14 集开始，总集数也无法从文件名推断。
 pub fn analyze<'a>(files: impl IntoIterator<Item = &'a str>) -> EpisodeIssues {
-    let mut by_episode: std::collections::BTreeMap<i64, Vec<String>> =
+    let mut by_episode: std::collections::BTreeMap<i64, Vec<&'a str>> =
         std::collections::BTreeMap::new();
     for file in files {
         if let Some(episode) = parse_episode_from_filename(file) {
-            by_episode.entry(episode).or_default().push(file.to_string());
+            by_episode.entry(episode).or_default().push(file);
         }
     }
 
     let mut duplicates = Vec::new();
-    for (episode, names) in &mut by_episode {
-        if names.len() > 1 {
-            names.sort();
+    for (&episode, names) in &by_episode {
+        // 版本号是「同一集的不同发布」，只有版本也相同的多个文件才算重复。
+        let mut by_version: std::collections::BTreeMap<i64, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for name in names {
+            by_version
+                .entry(release_version_from_filename(name))
+                .or_default()
+                .push(name);
+        }
+        let mut duplicated: Vec<String> = by_version
+            .into_iter()
+            .filter(|(_, files)| files.len() > 1)
+            .flat_map(|(_, files)| files.into_iter().map(str::to_string))
+            .collect();
+        if duplicated.len() > 1 {
+            duplicated.sort();
             duplicates.push(DuplicateEpisode {
-                episode: *episode,
-                files: names.clone(),
+                episode,
+                files: duplicated,
             });
         }
     }
@@ -142,7 +203,7 @@ pub fn analyze<'a>(files: impl IntoIterator<Item = &'a str>) -> EpisodeIssues {
 
 #[cfg(test)]
 mod tests {
-    use super::{analyze, parse_episode, release_version};
+    use super::{analyze, parse_episode, parse_episode_from_filename, release_version};
 
     #[test]
     fn parses_episode_and_version_from_release_names() {
@@ -156,6 +217,105 @@ mod tests {
         assert_eq!(parse_episode("05_BigBuckBunny_短.mp4"), Some(5));
         assert_eq!(parse_episode("NCOP.mkv"), None);
         assert_eq!(parse_episode("Anime 1080p.mkv"), None);
+        // 大写分辨率标记也不能当成集数。
+        assert_eq!(
+            parse_episode_from_filename("[720P] 测试番 - 05.mkv"),
+            Some(5)
+        );
+        assert_eq!(
+            parse_episode_from_filename("[480P] 测试番 - 05.mkv"),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn season_numbers_are_not_episodes() {
+        assert_eq!(
+            parse_episode_from_filename(
+                "[ANi] 戀上換裝娃娃 Season 2 - 24 [1080P][Baha][WEB-DL][AAC AVC][CHT][MP4].mkv"
+            ),
+            Some(24)
+        );
+
+        // bangumi.moe 实际标题：Season 2/3 在标题里，集数在 ` - ` 后面。
+        assert_eq!(
+            parse_episode(
+                "[黒ネズミたち] 黑化吧！聖女大人 第二季 / Kizu darake Seijo Season 2 - 07 (Baha 1920x1080 AVC AAC MP4)"
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            parse_episode(
+                "[黒ネズミたち] 青之蘆葦 第二季 / Ao Ashi Season 2 - 06 (ABEMA 1920x1080 AVC AAC MKV)"
+            ),
+            Some(6)
+        );
+        assert_eq!(
+            parse_episode(
+                "[黒ネズミたち] 百妖谱·京师篇（日配版） / Fairies Album Season 3 (Japanese Dub) - 06 (ABEMA 1920x1080 AVC AAC MKV)"
+            ),
+            Some(6)
+        );
+        assert_eq!(
+            parse_episode(
+                "[黒ネズミたち] 黑色五葉草 Season 2 / Black Clover 2nd Season - 176 (ABEMA 1920x1080 AVC AAC MKV)"
+            ),
+            Some(176)
+        );
+
+        // 同一季的 13–24 集不应因为标题里的 `Season 2` 而全部变成第 2 集。
+        let files: Vec<String> = (13..=24)
+            .map(|episode| {
+                format!(
+                    "[ANi] 戀上換裝娃娃 Season 2 - {episode} [1080P][Baha][WEB-DL][AAC AVC][CHT][MP4].mkv"
+                )
+            })
+            .collect();
+        let names: Vec<&str> = files.iter().map(String::as_str).collect();
+        let issues = analyze(names);
+        assert!(issues.duplicates.is_empty());
+        assert!(issues.missing.is_empty());
+
+        // 只有季号、没有集数时不应解析出集数。
+        assert_eq!(
+            parse_episode_from_filename("[ANi] 测试番 Season 2 [1080P].mkv"),
+            None
+        );
+    }
+
+    #[test]
+    fn hyphen_separator_skips_numbered_season_in_title() {
+        // 季号直接跟在中文标题后面、没有 Season 关键字。
+        for episode in 6..=8 {
+            assert_eq!(
+                parse_episode_from_filename(&format!(
+                    "[ANi]  冰劍的魔術師將要統一世界 2 - {episode} [1080P][Baha][WEB-DL][AAC AVC][CHT][MP4].mkv"
+                )),
+                Some(episode)
+            );
+        }
+        assert_eq!(
+            parse_episode_from_filename(
+                "[黒ネズミたち] 冰劍的魔術師將要統一世界 2 / Hyouken no Majutsushi ga Sekai wo Suberu II - 06 (CR 1920x1080 AVC AAC MKV).mkv"
+            ),
+            Some(6)
+        );
+
+        // 标题本身的数字（例如《86》）不再抢走集数。
+        assert_eq!(
+            parse_episode_from_filename("[Lilith-Raws] 86 - 01 [1080p].mkv"),
+            Some(1)
+        );
+
+        // 分隔符后面没有数字时，仍取第一个集数（04_52 -> 04）。
+        assert_eq!(
+            parse_episode_from_filename("[BeanSub][Show][04_52][1080P].mkv"),
+            Some(4)
+        );
+        assert_eq!(
+            parse_episode_from_filename("番剧 06 - [字幕组].mkv"),
+            Some(6)
+        );
     }
 
     #[test]
@@ -165,12 +325,27 @@ mod tests {
             "番剧 - 02.mkv",
             "番剧 - 02v2.mkv",
             "番剧 - 04.mkv",
+            "番剧 - 04 (1).mkv",
             "番剧 - 14.mkv",
         ]);
         assert_eq!(issues.duplicates.len(), 1);
-        assert_eq!(issues.duplicates[0].episode, 2);
-        assert_eq!(issues.duplicates[0].files.len(), 2);
+        assert_eq!(issues.duplicates[0].episode, 4);
+        assert_eq!(
+            issues.duplicates[0].files,
+            vec!["番剧 - 04 (1).mkv", "番剧 - 04.mkv"]
+        );
         assert_eq!(issues.missing, vec![3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn different_versions_of_one_episode_are_not_duplicates() {
+        // 自动下载会保留旧版本：06 与 06v2 是同一集的新旧发布，不是重复文件。
+        let issues = analyze(["番剧 - 06.mkv", "番剧 - 06v2.mkv"]);
+        assert!(issues.duplicates.is_empty());
+        assert!(issues.missing.is_empty());
+
+        let test_clips = analyze(["03_Sintel.mp4", "03v2_Sintel.mp4"]);
+        assert!(test_clips.duplicates.is_empty());
     }
 
     #[test]

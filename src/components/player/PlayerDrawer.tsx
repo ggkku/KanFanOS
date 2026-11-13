@@ -1871,86 +1871,91 @@ export function PlayerDrawer({
                 </span>
               </div>
 
-              <div className="mt-3 flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => previous && onSelectEpisode(previous)}
-                  disabled={!previous}
-                  className={iconButton}
-                  title="上一集"
-                >
-                  <SkipBack size={16} />
-                </button>
+              {/* 左组是播放/音量，右组是倍速/音轨/字幕/全屏。
+                  抽屉在矮窗口下最窄只有 560px，单行放不下时让右组整体
+                  换到下一行并保持右对齐，避免全屏按钮被挤出抽屉。 */}
+              <div className="mt-3 flex flex-wrap items-center gap-x-1 gap-y-2">
+                <div className="flex min-w-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => previous && onSelectEpisode(previous)}
+                    disabled={!previous}
+                    className={iconButton}
+                    title="上一集"
+                  >
+                    <SkipBack size={16} />
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={togglePlay}
-                  disabled={!playerState}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-                  title={paused ? "播放" : "暂停"}
-                >
-                  {paused ? (
-                    <Play size={18} fill="currentColor" />
-                  ) : (
-                    <Pause size={18} fill="currentColor" />
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    onClick={togglePlay}
+                    disabled={!playerState}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+                    title={paused ? "播放" : "暂停"}
+                  >
+                    {paused ? (
+                      <Play size={18} fill="currentColor" />
+                    ) : (
+                      <Pause size={18} fill="currentColor" />
+                    )}
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={() => next && onSelectEpisode(next)}
-                  disabled={!next}
-                  className={iconButton}
-                  title="下一集"
-                >
-                  <SkipForward size={16} />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => next && onSelectEpisode(next)}
+                    disabled={!next}
+                    className={iconButton}
+                    title="下一集"
+                  >
+                    <SkipForward size={16} />
+                  </button>
 
-                <label
-                  title="当前集播放结束后自动播放下一集；最后一集播放完会停止"
-                  className="ml-1 flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 py-1 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
-                >
+                  <label
+                    title="当前集播放结束后自动播放下一集；最后一集播放完会停止"
+                    className="ml-1 flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 py-1 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoPlayNext}
+                      onChange={(event) => setAutoPlayNext(event.target.checked)}
+                      className="h-3.5 w-3.5 accent-indigo-500"
+                      aria-label="自动连播"
+                    />
+                    自动连播
+                  </label>
+
+                  <div className="mx-2 h-5 w-px bg-neutral-800" />
+
+                  <button
+                    type="button"
+                    onClick={toggleMute}
+                    disabled={!playerState}
+                    className={iconButton}
+                    title={muted ? "取消静音" : "静音"}
+                  >
+                    {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                  </button>
                   <input
-                    type="checkbox"
-                    checked={autoPlayNext}
-                    onChange={(event) => setAutoPlayNext(event.target.checked)}
-                    className="h-3.5 w-3.5 accent-indigo-500"
-                    aria-label="自动连播"
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={muted ? 0 : Math.round(volume)}
+                    onChange={(event) =>
+                      changeVolume(Number(event.target.value))
+                    }
+                    onPointerUp={commitSystemVolume}
+                    onPointerCancel={commitSystemVolume}
+                    onKeyUp={commitSystemVolume}
+                    disabled={!playerState}
+                    className="h-1 w-20 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
+                    title="系统音量"
                   />
-                  自动连播
-                </label>
+                  <span className="w-8 text-[11px] tabular-nums text-neutral-500">
+                    {Math.round(muted ? 0 : volume)}
+                  </span>
+                </div>
 
-                <div className="mx-2 h-5 w-px bg-neutral-800" />
-
-                <button
-                  type="button"
-                  onClick={toggleMute}
-                  disabled={!playerState}
-                  className={iconButton}
-                  title={muted ? "取消静音" : "静音"}
-                >
-                  {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-                </button>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={muted ? 0 : Math.round(volume)}
-                  onChange={(event) =>
-                    changeVolume(Number(event.target.value))
-                  }
-                  onPointerUp={commitSystemVolume}
-                  onPointerCancel={commitSystemVolume}
-                  onKeyUp={commitSystemVolume}
-                  disabled={!playerState}
-                  className="h-1 w-20 cursor-pointer accent-indigo-500 disabled:cursor-not-allowed"
-                  title="系统音量"
-                />
-                <span className="w-8 text-[11px] tabular-nums text-neutral-500">
-                  {Math.round(muted ? 0 : volume)}
-                </span>
-
-                <div className="ml-auto flex items-center gap-1.5">
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
                   <select
                     value={playerState?.speed ?? 1}
                     onChange={(event) =>

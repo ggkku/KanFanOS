@@ -217,6 +217,14 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
 - 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
 
+## 1.3.6 控制栏换行与版本重复修复
+
+- 窗口模式控制栏从单行 `flex` 改为 `flex-wrap`：播放/音量为一组，倍速/音轨/音频输出/字幕/全屏为另一组（`ml-auto shrink-0`）。抽屉宽度 `min(880px, 76vw, max(560px, 80vh))` 在 1280×720 或最小窗口下内容宽度只有 544～528px，而单行需要约 570px，右组会溢出到抽屉之外；现在整组换行，全屏按钮始终可见。
+- 「重复」只在同一集且 `release_version_from_filename` 相同才成立。自动下载的 `06v2` 会保留 `06`，两者是同一集的新旧发布；只有真正重复下载（如 `04.mkv` 与 `04 (1).mkv`）才提示重复。`720P`/`480P` 这类大写分辨率标记也按分辨率跳过。
+- `find_episode` 在候选数字前一个单词是 `Season`/`Part`/`Cour`/`Volume` 时跳过该数字，避免 `[ANi] 戀上換裝娃娃 Season 2 - 24 [...]` 先把季号 `2` 当成集数，导致整季 13–24 集都被解析成第 2 集并报重复。
+- 第三条「任意位置数字」规则额外优先取 ` - ` 分隔符之后的数字：`冰劍的魔術師將要統一世界 2 - 06`、`Hyouken ... II - 06`、`Black Clover 2nd Season - 176` 因此得到 6/6/176，而不再取标题里的季号。` - ` 后面没有数字时仍回退到第一个集数（`04_52` 保持 04）。
+- 用 bangumi.moe 的 50 条真实 RSS 标题做旧/新对比：8 条结果改变（4 条靠 Season 关键字、4 条靠 ` - ` 优先级），其余 42 条不变；`S01 | 01-24`、`25-37` 这类合集标题仍由 `is_batch` 在匹配阶段过滤。
+
 ## 1.3.5 系统音频输出与集数完整性
 
 - 播放器「音频输出」改为切换 Windows 默认播放设备：`system_audio.rs` 用 Core Audio 枚举 `EnumAudioEndpoints(eRender)`，通过未公开的 `IPolicyConfig::SetDefaultEndpoint` 为 eConsole / eMultimedia / eCommunications 设置默认端点；端点 ID `{0.0.0.00000000}.{GUID}` 转成 mpv 的 `wasapi/{GUID}` 后立即 `set_property audio-device`，正在播放的 mpv 会跟着切。音量仍由 `system_volume` 控制默认端点，所以切换后滑块天然指向新设备；前端切换后重新枚举并立即读一次音量。
