@@ -254,6 +254,14 @@ export interface PlayerError {
   message: string;
 }
 
+/** 鼠标在原生视频画面窗口内的位置（物理像素，相对画面左上角）。 */
+export interface PlayerMouseActivity {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface MediaStats {
   pending: number;
   processing: number;

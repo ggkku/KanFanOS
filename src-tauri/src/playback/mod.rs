@@ -29,9 +29,20 @@ pub const STATE_EVENT: &str = "player-state";
 pub const CLOSED_EVENT: &str = "player-closed";
 pub const ERROR_EVENT: &str = "player-error";
 /// 鼠标移动通知。原生视频窗口会吞掉网页的 mousemove，只能从系统层面轮询光标。
+/// 事件携带光标相对视频画面窗口的位置（物理像素），前端据此判断是否在画面内。
 pub const MOUSE_EVENT: &str = "player-mouse-activity";
 /// 原生视频窗口上的左键单击。网页收不到这个点击，需要后端轮询系统鼠标。
 pub const CLICK_EVENT: &str = "player-click";
+
+/// 鼠标活动通知。坐标相对原生视频画面窗口，左上角为 (0, 0)。
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MouseActivity {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,8 +301,24 @@ pub fn resize(app: &AppHandle, rect: PlayerRect) -> Result<()> {
 
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
 
-/// 隐藏/显示鼠标指针。全屏收起控制栏时一并隐藏，和常见播放器一致。
+/// 隐藏/显示鼠标指针。全屏鼠标静止时一并隐藏，和常见播放器一致。
+///
+/// 光标处在原生视频窗口上时，可见性由 mpv 决定，只调 ShowCursor 会被它的
+/// 鼠标移动处理覆盖。因此这里同时把 mpv 的自动隐藏策略切换成对应状态：
+/// 隐藏时 `always`（单击后立刻消失），显示时恢复 2.5 秒静止自动隐藏。
+/// 这一步放在去重判断之前，保证新一集启动的 mpv 也能重新同步。
 pub fn set_cursor_visible(app: &AppHandle, visible: bool) -> Result<()> {
+    let _ = send(
+        app,
+        serde_json::json!({
+            "command": [
+                "set_property",
+                "cursor-autohide",
+                if visible { "2500" } else { "always" },
+            ]
+        }),
+    );
+
     if CURSOR_HIDDEN.load(Ordering::SeqCst) == !visible {
         return Ok(());
     }
@@ -510,19 +537,41 @@ fn observe_commands() -> Vec<String> {
     .collect()
 }
 
+/// 原生视频画面窗口在屏幕上的矩形（物理像素）。
+fn video_surface_rect(
+    app: &AppHandle,
+) -> Option<windows::Win32::Foundation::RECT> {
+    use std::ffi::c_void;
+
+    use windows::Win32::{
+        Foundation::{HWND, RECT},
+        UI::WindowsAndMessaging::GetWindowRect,
+    };
+
+    let surface = app
+        .state::<AppState>()
+        .video_surface
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)?;
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(HWND(surface as *mut c_void), &mut rect) }.ok()?;
+    Some(rect)
+}
+
 /// 播放期间轮询全局光标位置，移动时通知前端。
 ///
 /// 网页只能收到控制栏等 HTML 区域的鼠标事件，光标移到原生视频窗口上时
 /// 事件会被 mpv 吃掉，所以全屏唤出控制栏必须从系统层面检测。
+/// 这里把光标位置换算成相对视频画面的坐标一起发出：光标在别的显示器上
+/// 移动时前端可以直接忽略，不会在其他屏幕动鼠标也把控制栏唤出来。
 fn spawn_mouse_watcher(app: AppHandle) {
     std::thread::spawn(move || {
-        use std::ffi::c_void;
-
         use windows::Win32::{
-            Foundation::{HWND, POINT, RECT},
+            Foundation::POINT,
             UI::{
                 Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
-                WindowsAndMessaging::{GetCursorPos, GetWindowRect},
+                WindowsAndMessaging::GetCursorPos,
             },
         };
 
@@ -540,34 +589,32 @@ fn spawn_mouse_watcher(app: AppHandle) {
                 break;
             }
 
+            let rect = video_surface_rect(&app);
+
             let mut point = POINT::default();
             if unsafe { GetCursorPos(&mut point) }.is_ok() {
                 let position = (point.x, point.y);
                 if last != Some(position) {
                     last = Some(position);
-                    let _ = app.emit(MOUSE_EVENT, ());
+                    if let Some(rect) = rect {
+                        let _ = app.emit(
+                            MOUSE_EVENT,
+                            MouseActivity {
+                                x: (point.x - rect.left) as f64,
+                                y: (point.y - rect.top) as f64,
+                                width: (rect.right - rect.left) as f64,
+                                height: (rect.bottom - rect.top) as f64,
+                            },
+                        );
+                    }
                 }
 
                 let left_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16
                     & 0x8000
                     != 0;
                 if left_down && !left_was_down {
-                    let surface = app
-                        .state::<AppState>()
-                        .video_surface
-                        .lock()
-                        .ok()
-                        .and_then(|guard| *guard);
-                    if let Some(surface) = surface {
-                        let mut rect = RECT::default();
-                        if unsafe {
-                            GetWindowRect(
-                                HWND(surface as *mut c_void),
-                                &mut rect,
-                            )
-                        }
-                        .is_ok()
-                            && point.x >= rect.left
+                    if let Some(rect) = rect {
+                        if point.x >= rect.left
                             && point.x <= rect.right
                             && point.y >= rect.top
                             && point.y <= rect.bottom

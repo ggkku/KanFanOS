@@ -42,10 +42,18 @@ pub fn spawn_embedded(
 ) -> Result<Child> {
     let program = crate::tools::resolve("mpv");
     let mut command = Command::new(&program);
+    // 沿用应用当前的光标状态：控制栏收起时 mpv 必须一直隐藏光标，
+    // 否则鼠标一动它就会把光标重新显示出来；否则移动显示、静止 2.5 秒隐藏。
+    let cursor_autohide = if super::CURSOR_HIDDEN.load(Ordering::SeqCst) {
+        "always"
+    } else {
+        "2500"
+    };
     command
         .arg("--terminal=no")
         .arg("--osc=no")
         .arg("--osd-level=0")
+        .arg(format!("--cursor-autohide={cursor_autohide}"))
         .arg("--keep-open=yes")
         // 音量由 Windows 系统主音量控制，mpv 始终保持 100%，避免换集时先以
         // 默认音量出声再跳到应用音量。

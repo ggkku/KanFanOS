@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AppWindow,
   ArrowUpDown,
@@ -204,6 +205,14 @@ export function SettingsPage({
       disposed = true;
     };
   }, [settings?.libraryId, scanning]);
+
+  // 退出动画期间页面已不可交互，滚轮也不应该再带动背后的页面。
+  useEffect(() => {
+    if (!quitting) return;
+    const preventWheel = (event: WheelEvent) => event.preventDefault();
+    window.addEventListener("wheel", preventWheel, { passive: false });
+    return () => window.removeEventListener("wheel", preventWheel);
+  }, [quitting]);
 
   const hasRoot = settings?.libraryRoot != null;
 
@@ -748,24 +757,33 @@ export function SettingsPage({
         </button>
       </div>
 
-      {quitting && (
-        <div className="kf-quit-overlay fixed inset-0 z-50 flex flex-col items-center justify-center bg-neutral-950">
-          <img
-            src={gunKucharLogo}
-            alt="GunKuchar Present"
-            className="kf-quit-logo h-24 w-24"
-          />
-          <div className="kf-quit-brand mt-5 whitespace-nowrap text-2xl font-semibold tracking-wide text-neutral-100">
-            GunKuchar Present
-          </div>
-          <div className="kf-quit-text mt-6 text-xs tracking-[0.32em] text-neutral-400">
-            正在退出
-          </div>
-          <div className="mt-4 h-[2px] w-36 overflow-hidden rounded-full bg-neutral-800">
-            <div className="kf-quit-progress h-full w-full rounded-full bg-sky-500" />
-          </div>
-        </div>
-      )}
+      {quitting &&
+        createPortal(
+          // 挂到 body：页面容器带有切换动画的 transform，会把 fixed 定位
+          // 限制在页面内容框内，导致退出图标在滚动后偏离视口中心。
+          <div className="kf-quit-overlay fixed inset-0 z-[80] bg-neutral-950">
+            {/* 图标本身按视口上下居中，文字和进度条固定在它下方。 */}
+            <div className="absolute inset-0 flex -translate-y-14 items-center justify-center">
+              <img
+                src={gunKucharLogo}
+                alt="GunKuchar Present"
+                className="kf-quit-logo h-24 w-24"
+              />
+            </div>
+            <div className="absolute inset-x-0 top-1/2 mt-4 flex flex-col items-center">
+              <div className="kf-quit-brand whitespace-nowrap text-2xl font-semibold tracking-wide text-neutral-100">
+                GunKuchar Present
+              </div>
+              <div className="kf-quit-text mt-6 text-xs tracking-[0.32em] text-neutral-400">
+                正在退出
+              </div>
+              <div className="mt-4 h-[2px] w-36 overflow-hidden rounded-full bg-neutral-800">
+                <div className="kf-quit-progress h-full w-full rounded-full bg-sky-500" />
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

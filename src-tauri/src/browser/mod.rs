@@ -10,16 +10,16 @@
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicU64, Ordering},
         LazyLock, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tauri::{
-    webview::{DownloadEvent, NewWindowResponse, PageLoadEvent},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl,
+    webview::{DownloadEvent, NewWindowResponse, PageLoadEvent},
 };
 
 /// 标签页 webview label 前缀。
@@ -63,11 +63,12 @@ static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// 隐藏后忽略边界同步：切页时布局变化会触发一次迟到的 `set_tab_bounds`，
 /// 如果它排在 `hide_tab` 之后执行，会把 webview 重新定位回可见区域。
-static HIDDEN_TABS: LazyLock<Mutex<HashSet<u64>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static HIDDEN_TABS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn lock_hidden() -> Result<std::sync::MutexGuard<'static, HashSet<u64>>> {
-    HIDDEN_TABS.lock().map_err(|_| anyhow::anyhow!("浏览器状态锁损坏"))
+    HIDDEN_TABS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("浏览器状态锁损坏"))
 }
 
 fn tab_label(tab_id: u64) -> String {
@@ -92,10 +93,7 @@ pub fn list_tabs(app: &AppHandle) -> Result<Vec<BrowserTabInfo>> {
         .into_iter()
         .filter_map(|(label, webview)| {
             let tab_id = parse_tab_id(&label)?;
-            let url = webview
-                .url()
-                .map(|url| url.to_string())
-                .unwrap_or_default();
+            let url = webview.url().map(|url| url.to_string()).unwrap_or_default();
             Some(BrowserTabInfo { tab_id, url })
         })
         .collect();
@@ -175,8 +173,7 @@ fn parse_url(input: &str) -> Result<tauri::Url> {
         format!("https://{trimmed}")
     };
 
-    let url = tauri::Url::parse(&candidate)
-        .with_context(|| format!("无法解析地址：{trimmed}"))?;
+    let url = tauri::Url::parse(&candidate).with_context(|| format!("无法解析地址：{trimmed}"))?;
 
     match url.scheme() {
         "http" | "https" => Ok(url),
@@ -738,7 +735,98 @@ pub fn open_tab(app: &AppHandle, url: &str, rect: BrowserRect) -> Result<u64> {
 })();
 "#,
         )
+        // qBittorrent 自带 WebUI 没有「打开目标下载目录」：桌面版才有这个动作，
+        // WebUI 只能复制内容路径。这里给 qBittorrent WebUI 的种子右键菜单补一项，
+        // 点击后通过 `/open-folder` 代理交给主程序在资源管理器里打开。
+        .initialization_script_for_all_frames(
+            r##"
+(function () {
+  if (window.__kanfanosQbFolderMenu) return;
+  var attempts = 0;
+
+  function openFolder(path) {
+    try {
+      window.location.href =
+        "https://kanfanos.invalid/open-folder?path=" +
+        encodeURIComponent(path);
+    } catch (error) {
+      // 导航被取消或页面正在卸载时忽略。
+    }
+  }
+
+  function openTorrentFolder(element) {
+    var hash = null;
+    if (element) {
+      hash = element.rowId || (element.dataset && element.dataset.rowId);
+    }
+    if (!hash && window.torrentsTable) {
+      var selected = window.torrentsTable.selectedRowsIds();
+      if (selected && selected.length > 0) hash = selected[0];
+    }
+    if (!hash) return;
+
+    // WebUI 的同步数据里不一定带内容路径，直接问一次 API 最可靠。
+    fetch("api/v2/torrents/info?hashes=" + encodeURIComponent(hash), {
+      credentials: "include"
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (list) {
+        var torrent = list && list[0];
+        var path = torrent && (torrent.content_path || torrent.save_path);
+        if (path) openFolder(path);
+      })
+      .catch(function () {
+        // 元数据还没取到或任务刚被删除：不弹菜单错误，静默忽略。
+      });
+  }
+
+  function setup() {
+    if (window.__kanfanosQbFolderMenu) return true;
+
+    var transfer = window.qBittorrent && window.qBittorrent.TransferList;
+    var tableMenu = transfer && transfer.contextMenu;
+    var list = document.getElementById("torrentsTableMenu");
+    if (!tableMenu || !list) return false;
+
+    var setLocation = list.querySelector('a[href="#setLocation"]');
+    var item = document.createElement("li");
+    item.innerHTML =
+      '<a href="#kfOpenFolder">' +
+      '<img src="images/directory.svg" alt="">' +
+      " 打开目标下载目录</a>";
+    list.insertBefore(item, setLocation ? setLocation.parentElement : null);
+
+    tableMenu.options.actions.kfOpenFolder = openTorrentFolder;
+    window.__kanfanosQbFolderMenu = true;
+    return true;
+  }
+
+  function poll() {
+    if (setup()) return;
+    attempts += 1;
+    // WebUI 的 transferlist 视图是 XHR 异步插入的，最多等 60 秒。
+    if (attempts < 120) window.setTimeout(poll, 500);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", poll);
+  } else {
+    poll();
+  }
+})();
+"##,
+        )
         .on_navigation(move |url| {
+            if let Some(path) = open_folder_proxy_target(url) {
+                crate::commands::resources::spawn_browser_open_folder(
+                    navigation_handle.clone(),
+                    path,
+                );
+                return false;
+            }
             if let Some(text) = add_follow_proxy_target(url) {
                 let _ = navigation_handle.emit("rss-add-follow-from-text", text);
                 return false;
@@ -952,14 +1040,32 @@ fn new_tab_proxy_target(url: &tauri::Url) -> Option<tauri::Url> {
         return None;
     }
 
-    let (_, value) = url
-        .query_pairs()
-        .find(|(key, _)| key == "url")?;
+    let (_, value) = url.query_pairs().find(|(key, _)| key == "url")?;
     let target = tauri::Url::parse(value.as_ref()).ok()?;
     if target.scheme() != "http" && target.scheme() != "https" {
         return None;
     }
     Some(target)
+}
+
+/// 打开下载目录代理：`/open-folder?path=...`。
+///
+/// 路径来自 qBittorrent WebUI 选中的任务；这里只做非空检查，是否真的存在
+/// 交给打开前的 `metadata` 校验。
+fn open_folder_proxy_target(url: &tauri::Url) -> Option<String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some("kanfanos.invalid")
+        || url.path() != "/open-folder"
+    {
+        return None;
+    }
+
+    let (_, value) = url.query_pairs().find(|(key, _)| key == "path")?;
+    let path = value.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// 选中文字添加追番代理：`/add-follow?text=...`。
@@ -971,9 +1077,7 @@ fn add_follow_proxy_target(url: &tauri::Url) -> Option<String> {
         return None;
     }
 
-    let (_, value) = url
-        .query_pairs()
-        .find(|(key, _)| key == "text")?;
+    let (_, value) = url.query_pairs().find(|(key, _)| key == "text")?;
     let text = value.trim();
     if text.is_empty() {
         return None;
@@ -990,9 +1094,7 @@ fn folder_create_proxy_target(url: &tauri::Url) -> Option<String> {
         return None;
     }
 
-    let (_, value) = url
-        .query_pairs()
-        .find(|(key, _)| key == "text")?;
+    let (_, value) = url.query_pairs().find(|(key, _)| key == "text")?;
     let text = value.trim();
     if text.is_empty() {
         return None;
@@ -1041,9 +1143,5 @@ fn accept_torrent(url: &tauri::Url, app: &AppHandle) {
     } else {
         "torrent"
     };
-    crate::commands::resources::accept_browser_torrent(
-        app,
-        url.as_str().to_string(),
-        kind,
-    );
+    crate::commands::resources::accept_browser_torrent(app, url.as_str().to_string(), kind);
 }

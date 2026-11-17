@@ -1,17 +1,22 @@
 //! 资源页命令：内嵌浏览器与 qBittorrent WebUI。
 
-use std::{fs, path::{Path, PathBuf}, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-use anyhow::{bail, Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     browser::{self, BrowserRect},
     qbittorrent::{self, Endpoint, ManagedQbittorrent, QbState, TorrentInfo},
     series_config::{self, SeriesConfig},
-    settings::{self, QbittorrentSettings, QBITTORRENT_MODE_EXTERNAL},
+    settings::{self, QBITTORRENT_MODE_EXTERNAL, QbittorrentSettings},
     state::AppState,
 };
 
@@ -65,8 +70,7 @@ pub struct DownloadDirMissingEvent {
 
 #[tauri::command]
 pub fn browser_create_folder(app: AppHandle, text: String) -> Result<String, String> {
-    let path = create_download_folder(&app, &text)
-        .map_err(to_message)?;
+    let path = create_download_folder(&app, &text).map_err(to_message)?;
     let path_string = path.to_string_lossy().into_owned();
     let _ = app.emit(
         "browser-folder-created",
@@ -110,13 +114,44 @@ pub(crate) fn spawn_browser_folder_create(app: AppHandle, text: String) {
     });
 }
 
+/// 供内嵌 qBittorrent WebUI 的「打开目标下载目录」调用。
+///
+/// 目录直接在资源管理器里打开；单文件任务定位到所在目录并选中文件。
+pub(crate) fn spawn_browser_open_folder(app: AppHandle, path: String) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = open_download_path(&app, &path) {
+            let state = app.state::<AppState>();
+            crate::paths::append_log(
+                &state.data_root,
+                &format!("打开下载目录失败（{path}）：{error:#}"),
+            );
+        }
+    });
+}
+
+fn open_download_path(app: &AppHandle, path: &str) -> AnyResult<()> {
+    let target = Path::new(path);
+    let metadata =
+        fs::metadata(target).with_context(|| format!("下载目录不存在：{}", target.display()))?;
+
+    if metadata.is_dir() {
+        app.opener()
+            .open_path(path.to_string(), None::<&str>)
+            .with_context(|| format!("无法打开下载目录：{}", target.display()))?;
+    } else {
+        app.opener()
+            .reveal_item_in_dir(target)
+            .with_context(|| format!("无法在资源管理器中定位：{}", target.display()))?;
+    }
+    Ok(())
+}
+
 fn create_download_folder(app: &AppHandle, text: &str) -> AnyResult<PathBuf> {
     let directory = ensure_download_dir(app)?;
 
     let name = sanitize_folder_name(text).context("选中文字不能作为文件夹名")?;
     let path = unique_directory(&directory, &name);
-    fs::create_dir(&path)
-        .with_context(|| format!("创建文件夹失败：{}", path.display()))?;
+    fs::create_dir(&path).with_context(|| format!("创建文件夹失败：{}", path.display()))?;
 
     // 文件夹名做了 Windows 合法化；如果原文含非法字符，用配置里的
     // name 保留原始显示名（只去掉换行等控制字符）。没有非法字符时
@@ -133,8 +168,7 @@ fn create_download_folder(app: &AppHandle, text: &str) -> AnyResult<PathBuf> {
     };
     if let Err(error) = series_config::save(&path, &config) {
         let _ = fs::remove_dir(&path);
-        return Err(error)
-            .with_context(|| format!("写入 {} 失败", series_config::CONFIG_FILE));
+        return Err(error).with_context(|| format!("写入 {} 失败", series_config::CONFIG_FILE));
     }
 
     Ok(path)
@@ -142,9 +176,8 @@ fn create_download_folder(app: &AppHandle, text: &str) -> AnyResult<PathBuf> {
 
 pub(crate) fn sanitize_folder_name(text: &str) -> Option<String> {
     const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
-        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
-        "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
 
     // 用一个内部标记表示“换行/制表符等硬空白”，它和旁边的普通空格
@@ -202,11 +235,7 @@ pub(crate) fn sanitize_folder_name(text: &str) -> Option<String> {
         return None;
     }
 
-    let stem = name
-        .split('.')
-        .next()
-        .unwrap_or(&name)
-        .to_ascii_uppercase();
+    let stem = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
     if RESERVED.contains(&stem.as_str()) {
         name.insert(0, '_');
     }
@@ -214,10 +243,7 @@ pub(crate) fn sanitize_folder_name(text: &str) -> Option<String> {
 }
 
 fn is_invalid_filename_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-    )
+    matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
 }
 
 /// 配置里的显示名：保留非法符号，只去掉换行/制表符等控制字符和
@@ -303,11 +329,7 @@ pub async fn browser_save_image(
 }
 
 /// 供浏览器 on_navigation 的图片保存代理调用。
-pub(crate) fn spawn_browser_image_save(
-    app: AppHandle,
-    url: String,
-    referer: Option<String>,
-) {
+pub(crate) fn spawn_browser_image_save(app: AppHandle, url: String, referer: Option<String>) {
     tauri::async_runtime::spawn(async move {
         let result = save_image_url(&app, &url, referer.as_deref(), None).await;
         let event = match result {
@@ -349,8 +371,7 @@ async fn save_image_url(
 
     let name = image_file_name(url, &mime);
     let path = unique_path(&directory, &name);
-    fs::write(&path, bytes)
-        .with_context(|| format!("写入图片失败：{}", path.display()))?;
+    fs::write(&path, bytes).with_context(|| format!("写入图片失败：{}", path.display()))?;
     Ok(path)
 }
 
@@ -492,7 +513,8 @@ fn image_file_name(url: &str, mime: &str) -> String {
     let mut name: String = raw
         .chars()
         .map(|ch| {
-            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
                 '_'
             } else {
                 ch
@@ -625,11 +647,7 @@ pub async fn browser_set_tab_bounds(
 }
 
 #[tauri::command]
-pub async fn browser_navigate_tab(
-    app: AppHandle,
-    tab_id: u64,
-    url: String,
-) -> Result<(), String> {
+pub async fn browser_navigate_tab(app: AppHandle, tab_id: u64, url: String) -> Result<(), String> {
     blocking_browser(move || browser::navigate_tab(&app, tab_id, &url)).await
 }
 
@@ -655,10 +673,7 @@ pub async fn browser_get_zoom() -> Result<u32, String> {
 }
 
 #[tauri::command]
-pub async fn browser_set_zoom(
-    app: AppHandle,
-    percent: u32,
-) -> Result<u32, String> {
+pub async fn browser_set_zoom(app: AppHandle, percent: u32) -> Result<u32, String> {
     blocking_browser_task(move || browser::set_zoom(&app, percent)).await
 }
 
@@ -669,25 +684,18 @@ pub async fn browser_close_tab(app: AppHandle, tab_id: u64) -> Result<(), String
 
 /// 列出后端实际存在的标签页 webview。
 #[tauri::command]
-pub async fn browser_list_tabs(
-    app: AppHandle,
-) -> Result<Vec<browser::BrowserTabInfo>, String> {
+pub async fn browser_list_tabs(app: AppHandle) -> Result<Vec<browser::BrowserTabInfo>, String> {
     blocking_browser_task(move || browser::list_tabs(&app)).await
 }
 
 /// 关闭不在 `keep` 里的标签页 webview，回收孤儿窗口。
 #[tauri::command]
-pub async fn browser_close_untracked(
-    app: AppHandle,
-    keep: Vec<u64>,
-) -> Result<(), String> {
+pub async fn browser_close_untracked(app: AppHandle, keep: Vec<u64>) -> Result<(), String> {
     blocking_browser(move || browser::close_untracked(&app, &keep)).await
 }
 
 #[tauri::command]
-pub fn get_qbittorrent_config(
-    state: State<'_, AppState>,
-) -> Result<QbittorrentConfig, String> {
+pub fn get_qbittorrent_config(state: State<'_, AppState>) -> Result<QbittorrentConfig, String> {
     let config = settings::load(&state.data_root)
         .map_err(to_message)?
         .qbittorrent;
@@ -794,16 +802,11 @@ pub async fn set_qbittorrent_save_path(
     settings::save(&state.data_root, &app_settings).map_err(to_message)?;
 
     if !path.is_empty()
-        && (app_settings.qbittorrent.mode == QBITTORRENT_MODE_EXTERNAL
-            || manager.is_running())
+        && (app_settings.qbittorrent.mode == QBITTORRENT_MODE_EXTERNAL || manager.is_running())
     {
-        let endpoint = resolve_endpoint(
-            state.inner(),
-            manager.inner(),
-            &app_settings.qbittorrent,
-        )
-        .await
-        .map_err(to_message)?;
+        let endpoint = resolve_endpoint(state.inner(), manager.inner(), &app_settings.qbittorrent)
+            .await
+            .map_err(to_message)?;
 
         qbittorrent::set_save_path(qb_state.inner(), &endpoint, &path)
             .await
@@ -896,13 +899,9 @@ pub async fn qbittorrent_list_torrents(
         .await
         .map_err(to_message)?;
 
-    let torrents = qbittorrent::dir_torrents(
-        qb_state.inner(),
-        &endpoint,
-        &preferences.save_path,
-    )
-    .await
-    .map_err(to_message)?;
+    let torrents = qbittorrent::dir_torrents(qb_state.inner(), &endpoint, &preferences.save_path)
+        .await
+        .map_err(to_message)?;
 
     Ok(TorrentListing {
         save_path: preferences.save_path,

@@ -16,6 +16,7 @@ import type {
   MediaStats,
   PageTransition,
   PlayerError,
+  PlayerMouseActivity,
   SeriesTransition,
   PlayerRect,
   PlayerStarted,
@@ -438,9 +439,11 @@ export function onPlayerError(
 }
 
 export function onPlayerMouseActivity(
-  handler: () => void,
+  handler: (activity: PlayerMouseActivity) => void,
 ): Promise<UnlistenFn> {
-  return listen("player-mouse-activity", () => handler());
+  return listen<PlayerMouseActivity>("player-mouse-activity", (event) =>
+    handler(event.payload),
+  );
 }
 
 export function onPlayerClick(handler: () => void): Promise<UnlistenFn> {

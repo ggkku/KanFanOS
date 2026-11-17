@@ -326,12 +326,21 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        // 退出时关掉内置 qBittorrent，避免留下孤儿进程。
-        if let tauri::RunEvent::Exit = event {
-            app_handle
-                .state::<qbittorrent::ManagedQbittorrent>()
-                .stop();
+    app.run(|app_handle, event| match event {
+        // 预览窗口是常驻的独立顶层窗口：主窗口点叉后事件循环不会自己结束，
+        // 进程和内置 qBittorrent 会留在后台。用户关闭主窗口时明确退出整个应用。
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { .. },
+            ..
+        } if label == "main" => {
+            app_handle.exit(0);
         }
+        // 退出时结束播放器（mpv）和内置 qBittorrent，避免留下孤儿进程。
+        tauri::RunEvent::Exit => {
+            playback::stop(app_handle);
+            app_handle.state::<qbittorrent::ManagedQbittorrent>().stop();
+        }
+        _ => {}
     });
 }

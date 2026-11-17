@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDateTime};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -63,7 +63,10 @@ pub async fn fetch(url: &str) -> Result<ParsedFeed> {
         .build()?;
     let response = client
         .get(url)
-        .header(reqwest::header::ACCEPT, "application/rss+xml, application/atom+xml, application/xml, text/xml, */*")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        )
         .send()
         .await
         .with_context(|| format!("请求 RSS 失败：{url}"))?;
@@ -215,18 +218,12 @@ pub fn parse(xml: &str) -> Result<ParsedFeed> {
             }
             Event::Text(event) => {
                 if text_tag.is_some() {
-                    append_text(
-                        &mut text_buf,
-                        &event.xml_content(XmlVersion::Implicit1_0),
-                    );
+                    append_text(&mut text_buf, &event.xml_content(XmlVersion::Implicit1_0));
                 }
             }
             Event::CData(event) => {
                 if text_tag.is_some() {
-                    append_text(
-                        &mut text_buf,
-                        &event.xml_content(XmlVersion::Implicit1_0),
-                    );
+                    append_text(&mut text_buf, &event.xml_content(XmlVersion::Implicit1_0));
                 }
             }
             Event::End(event) => {
@@ -649,48 +646,145 @@ fn select_release_line(text: &str) -> String {
 }
 
 fn strip_leading_group(value: &str) -> &str {
-    let value = value.trim_start();
-    let Some(open) = value.chars().next() else {
-        return value;
-    };
-    let close = match open {
-        '[' => ']',
-        '【' => '】',
-        '（' => '）',
-        '(' => ')',
-        _ => return value,
-    };
-    let Some(end) = value[open.len_utf8()..].find(close) else {
-        return value;
-    };
-    &value[open.len_utf8() + end + close.len_utf8()..].trim_start()
+    let mut rest = value.trim_start();
+    let mut first = true;
+
+    loop {
+        // `★10月新番` / `★新番★` 这类季节标签。
+        if let Some(after_star) = rest.strip_prefix('★') {
+            if let Some(end) = after_star.find('★') {
+                rest = after_star[end + '★'.len_utf8()..].trim_start();
+                first = false;
+                continue;
+            }
+            if let Some(end) = after_star.find('[') {
+                let tag = &after_star[..end];
+                if tag.contains("新番") || tag.contains('月') {
+                    rest = after_star[end..].trim_start();
+                    first = false;
+                    continue;
+                }
+            }
+            return rest;
+        }
+
+        let Some(open) = rest.chars().next() else {
+            return rest;
+        };
+        let close = match open {
+            '[' => ']',
+            '【' => '】',
+            '（' => '）',
+            '(' => ')',
+            _ => return rest,
+        };
+        let Some(end) = rest[open.len_utf8()..].find(close) else {
+            return rest;
+        };
+        let after = rest[open.len_utf8() + end + close.len_utf8()..].trim_start();
+
+        // 第一个括号几乎总是字幕组，直接去掉。
+        if first {
+            rest = after;
+            first = false;
+            continue;
+        }
+
+        // 后面的括号：只有后面紧跟正文（字母/CJK/★）时才当第二个标签剥掉。
+        // `[字幕组][标题][06]` 的标题括号后面是 `[06]`，保留。
+        if after
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_alphabetic() || ch == '★')
+        {
+            rest = after;
+            continue;
+        }
+        return rest;
+    }
 }
 
 fn trim_title_region(value: &str) -> &str {
+    // 没有解析出集数时（例如 `Show - 15.5` 这类特殊集），不要把尾巴上的
+    // ` - 15.5` 留在番剧名里。
+    static TRAILING_NUMBER: OnceLock<Regex> = OnceLock::new();
+    let regex =
+        TRAILING_NUMBER.get_or_init(|| Regex::new(r"\s+-\s+\d+(?:\.\d+)?(?:v\d+)?\s*$").unwrap());
     let cut = value
         .char_indices()
         .find(|(_, ch)| matches!(ch, '[' | '【' | '(' | '（'))
         .map(|(index, _)| index)
         .unwrap_or(value.len());
-    trim_title_tail(&value[..cut])
+    let value = &value[..cut];
+    let value = match regex.find(value) {
+        Some(found) => &value[..found.start()],
+        None => value,
+    };
+    trim_title_tail(value)
 }
 
 fn trim_title_tail(value: &str) -> &str {
-    value.trim().trim_end_matches(|ch: char| {
-        matches!(ch, '-' | '–' | '—' | '_' | '~' | '/' | '|' | '｜')
-    })
+    value
+        .trim()
+        .trim_end_matches(|ch: char| matches!(ch, '-' | '–' | '—' | '_' | '~' | '/' | '|' | '｜'))
+}
+
+/// 去掉标题两侧成对的包裹括号；`/` 切开后的半个括号也会补掉。
+///
+/// `[标题]` -> `标题`；`[标题 / Title]` 切分后的 `[标题` 和 `Title]`
+/// 也会去掉半边；但 `Show [中文配音]` 里的括号是完整的标签，保留给后面的
+/// 标签清理逻辑处理。
+fn trim_title_brackets(value: &str) -> &str {
+    let value = value.trim();
+    let bracket_len = '['.len_utf8();
+    let fullwidth_len = '【'.len_utf8();
+
+    if value.starts_with('[') && value.ends_with(']') && value.len() > bracket_len * 2 {
+        return value[bracket_len..value.len() - bracket_len].trim();
+    }
+    if value.starts_with('【') && value.ends_with('】') && value.len() > fullwidth_len * 2 {
+        return value[fullwidth_len..value.len() - fullwidth_len].trim();
+    }
+    if value.starts_with('[') && !value.contains(']') {
+        return value[bracket_len..].trim();
+    }
+    if value.ends_with(']') && !value.contains('[') {
+        return value[..value.len() - bracket_len].trim();
+    }
+    if value.starts_with('【') && !value.contains('】') {
+        return value[fullwidth_len..].trim();
+    }
+    if value.ends_with('】') && !value.contains('【') {
+        return value[..value.len() - fullwidth_len].trim();
+    }
+    value
 }
 
 fn split_title_candidates(value: &str) -> Vec<String> {
     static SPLIT: OnceLock<Regex> = OnceLock::new();
     let regex = SPLIT.get_or_init(|| Regex::new(r"\s+[/|｜]\s+").unwrap());
     let mut candidates = Vec::new();
+    static TRAILING_TAG: OnceLock<Regex> = OnceLock::new();
+    let trailing_tag =
+        TRAILING_TAG.get_or_init(|| Regex::new(r"\s*[\[【]([^\]】]{1,12})[\]】]\s*$").unwrap());
     for part in regex.split(value) {
-        let candidate = trim_title_tail(part.trim());
-        let candidate = candidate.strip_prefix('[').unwrap_or(candidate);
-        let mut candidate = candidate.strip_suffix(']').unwrap_or(candidate).trim();
+        let mut candidate = trim_title_tail(part.trim());
+        candidate = trim_title_brackets(candidate);
+        // 去掉结尾的字幕/配音标签，例如 `假面騎士 MY-TH [中文配音]`。
+        if let Some(found) = trailing_tag.find(candidate) {
+            let tag = &candidate[found.start()..found.end()];
+            if [
+                "配音", "字幕", "内封", "内嵌", "简", "繁", "版", "修", "合集",
+            ]
+            .iter()
+            .any(|keyword| tag.contains(keyword))
+            {
+                candidate = candidate[..found.start()].trim();
+            }
+        }
         if let Some(group) = release_group(candidate) {
-            if candidate.starts_with(&format!("[{group}]")) || candidate.starts_with(&format!("【{group}】"))
+            if candidate.starts_with(&format!("[{group}]"))
+                || candidate.starts_with(&format!("【{group}】"))
             {
                 candidate = strip_leading_group(candidate);
             }
@@ -722,7 +816,11 @@ fn bracket_tokens(value: &str) -> Vec<String> {
     let regex = TOKEN.get_or_init(|| Regex::new(r"[\[\(【]([^\]\)】]+)[\]\)】]").unwrap());
     regex
         .captures_iter(value)
-        .filter_map(|captures| captures.get(1).map(|group| group.as_str().trim().to_string()))
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .map(|group| group.as_str().trim().to_string())
+        })
         .filter(|token| !token.is_empty())
         .collect()
 }
@@ -768,7 +866,8 @@ fn normalize(value: &str) -> String {
 fn parse_resolution(title: &str) -> Option<String> {
     static RESOLUTION_P: OnceLock<Regex> = OnceLock::new();
     static RESOLUTION_DIM: OnceLock<Regex> = OnceLock::new();
-    let explicit = RESOLUTION_P.get_or_init(|| Regex::new(r"(?i)\b(2160|1080|720|480)p\b").unwrap());
+    let explicit =
+        RESOLUTION_P.get_or_init(|| Regex::new(r"(?i)\b(2160|1080|720|480)p\b").unwrap());
     if let Some(value) = explicit
         .captures(title)
         .and_then(|captures| captures.get(1))
@@ -859,17 +958,21 @@ mod tests {
         );
         assert_eq!(parsed.group.as_deref(), Some("悠哈璃羽字幕社"));
         assert_eq!(parsed.title.as_deref(), Some("FX战士久留美"));
-        assert!(parsed
-            .title_candidates
-            .contains(&"FX Senshi Kurumi-chan".to_string()));
+        assert!(
+            parsed
+                .title_candidates
+                .contains(&"FX Senshi Kurumi-chan".to_string())
+        );
         assert_eq!(parsed.episode, Some(4));
         assert_eq!(parsed.resolution.as_deref(), Some("1080p"));
         assert_eq!(parsed.subtitle_packaging.as_deref(), Some("简繁日内封"));
-        assert!(parsed
-            .subtitle
-            .as_deref()
-            .unwrap_or_default()
-            .contains("CHS_JP&CHT_JP"));
+        assert!(
+            parsed
+                .subtitle
+                .as_deref()
+                .unwrap_or_default()
+                .contains("CHS_JP&CHT_JP")
+        );
         assert!(super::subtitle_packaging_matches("简繁日内封", &parsed.raw));
         assert!(!super::subtitle_packaging_matches("内封", &parsed.raw));
     }
@@ -881,9 +984,11 @@ mod tests {
         );
         assert_eq!(parsed.group.as_deref(), Some("ANi"));
         assert_eq!(parsed.title.as_deref(), Some("學生會也有洞！"));
-        assert!(parsed
-            .title_candidates
-            .contains(&"Seitokai ni mo Ana wa Aru".to_string()));
+        assert!(
+            parsed
+                .title_candidates
+                .contains(&"Seitokai ni mo Ana wa Aru".to_string())
+        );
         assert_eq!(parsed.episode, Some(4));
         assert_eq!(parsed.resolution.as_deref(), Some("1080p"));
         assert_eq!(parsed.source.as_deref(), Some("Baha / WEB-DL"));

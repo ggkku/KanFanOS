@@ -217,6 +217,22 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
 - 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
 
+## 1.3.7 内置 qBittorrent WebUI 打开下载目录与关闭残留修复
+
+- **集数解析改为数字段置信度打分**：旧的 `find_episode` 是「按正则依次匹配 + 首个命中」，`Season 2`、`Show 2 [06]` 这类命名只能靠 ` - ` 特判，覆盖不全。现在 `episode_names::numeric_candidates` 把标题里的每个数字段都当成候选，分别累加「像集数」和「像季数」的特征分，再取 `episode_score - season_score` 最高且为正的那个。明确标记（`SxxExx`、`EP06`、`#6`、`第6话`）仍然直接返回，不参与竞争。
+  - 集数加分：` - ` 之后、`[06]`/`[06v2]`/`[04_52]` 这类数字括号、`第`/`话`/`#`、`2x06` 的 x 后面、两位数数值、范围 `01-12` 的第一个。
+  - 季数加分：`Season`/`Part`/`Cour`/`Vol`/`S02`/`2季`/`第2季`/`第2期`/`2nd Season`/`2x06` 的 2、` - ` 前且后面还有像样集数的裸数字。
+  - 技术数字直接排除：年份（>999）、`720P/480p` 等分辨率、`x264/H265/AV1/VP9`、`10bit/8bit`、`5.1ch/2.0`、`320kbps/23.976fps`、`BT.709` 等。
+  - 开头的 `[Group7]` 是组名；`[WebRip ... ASSx1]` 这类参数括号整段降权；`04 (1)` / `04 (12)` 的括号数字按重复下载副本后缀丢弃（但如果前面没有像样的集数，`Show 2 (6)` 里的 6 仍会被采用）。
+  - 只有一个裸数字时保留旧行为（`Show 2.mkv` -> 2、`Show 2 - 1080p` -> 2）；标题里已有明确季号（`Show Season 2`、`Show S2`、`Show 2季`）时返回 None，不再把季号当集数。
+  - 用真实库的 50 个文件名回放，`[Nekomoe kissaten&LoliHouse] Cyberpunk Edgerunners - 10 [WebRip 1080p HEVC-10bit AAC ASSx1]` 这类此前会选中 `ASSx1` 里 1 的样本也恢复为第 10 集。
+- **dmhy 批量回放**：2026-11-17 通过系统代理抓取 dmhy 前 30 页（2400 条），只取「标题」列（不含字幕组链接和评论数），筛出 101 部名称不同的番剧，标题均含至少两段数字。用 `parse_release_title` 批量回放后，分辨率/容器/版本/字幕组/番剧名字段 0 处不一致；集数只有 3 条需要人工确认（`02-03` 区间取 2、柯南 `第30号杀人事件` 无集数、`15.5` 半集无 int 表示）。期间补齐：4 位数集数（蜡笔小新 1361、小丸子 1546）、`BIG5` 编码不再被当第 5 集、`1920x1080` 不再触发 `2x06` 的 x 集数规则、多段开头标签 `[搬运][Erai-raws]` / `[TVB粵語]` / `★10月新番` 不再污染番剧名、`第177页` 按集数标记、`第30号` 不再误报第 30 集、`Show - 15.5` 的标题不再带尾巴。抓取和回放数据放在仓库外的 `C:\dmhy-check`。
+- **关闭主窗口后进程残留**：`playback::ensure_preview_window` 在启动时创建一个常驻的隐藏顶层窗口（`player-preview`，进度条悬停预览用）。Tauri 只在「所有窗口都销毁」时才自动退出事件循环，所以点叉关掉主窗口后进程、WebView2 和内置 qBittorrent 会全部留在后台。现在在 `RunEvent::WindowEvent { label: "main", CloseRequested }` 里显式 `app_handle.exit(0)`；`RunEvent::Exit` 同时调用 `playback::stop`（结束 mpv）和 `ManagedQbittorrent::stop`。不能只依赖 `RunEvent::Exit`，因为预览窗口在时根本不会触发它。
+- qBittorrent 5.3.0 的 WebUI 种子右键菜单**没有**「打开目标下载目录」：打开文件夹是桌面 GUI 的动作，WebUI API 不提供对应接口，只能「复制 → 内容路径」。所以内置 WebUI 里按桌面版的习惯右键是找不到入口的，不是菜单坏了。
+- 资源页的浏览器子 webview 会给 qBittorrent WebUI 注入脚本：等 `window.qBittorrent.TransferList.contextMenu` 和 `#torrentsTableMenu` 就绪后，在「更改保存位置」前插入「打开目标下载目录」，并把 `kfOpenFolder` 注册到菜单的 `options.actions`。脚本对普通网页也会运行，但找不到这些元素就直接退出；`window.__kanfanosQbFolderMenu` 防止重复注入。
+- 点击后用右键行的 `rowId`（种子 hash）请求 `/api/v2/torrents/info?hashes=...`，取 `content_path`（为空回退 `save_path`），再跳转 `https://kanfanos.invalid/open-folder?path=...` 代理。`on_navigation` 返回 false 取消导航，交给主程序处理；远程子 webview 不需要 Tauri IPC 权限。
+- `spawn_browser_open_folder` 先用 `fs::metadata` 校验路径：目录用 opener 插件直接打开；单文件用 `reveal_item_in_dir` 打开所在目录并选中文件。路径不存在（任务还没取到元数据或被移动）只写数据目录日志。
+
 ## 1.3.6 控制栏换行与版本重复修复
 
 - 窗口模式控制栏从单行 `flex` 改为 `flex-wrap`：播放/音量为一组，倍速/音轨/音频输出/字幕/全屏为另一组（`ml-auto shrink-0`）。抽屉宽度 `min(880px, 76vw, max(560px, 80vh))` 在 1280×720 或最小窗口下内容宽度只有 544～528px，而单行需要约 570px，右组会溢出到抽屉之外；现在整组换行，全屏按钮始终可见。

@@ -89,6 +89,9 @@ const iconButton =
 /** 控制栏收起动画时长；点击画面隐藏后，鼠标在这段时间内不会唤出控制栏。 */
 const CONTROLS_HIDE_DURATION_MS = 300;
 
+/** 控制栏收起后，只有光标移到画面高度的这个比例以下才会重新唤出。 */
+const CONTROLS_REVEAL_BOTTOM_RATIO = 0.9;
+
 /** 自动连播是应用级偏好，不随番剧/集数重置。 */
 const AUTO_PLAY_NEXT_STORAGE_KEY = "kanfanos.player.autoPlayNext";
 const AUDIO_TRACK_STORAGE_KEY = "kanfanos.player.audioTrack";
@@ -366,6 +369,10 @@ export function PlayerDrawer({
   );
   // 全屏时控制栏自动隐藏，鼠标移动时重新出现。
   const [controlsVisible, setControlsVisible] = useState(true);
+  // 供鼠标回调同步读取，避免为了拿到最新值反复重新订阅事件。
+  const controlsVisibleRef = useRef(controlsVisible);
+  // 全屏时鼠标指针跟随鼠标活动显示，静止 2.5 秒后隐藏（控制栏不一定出现）。
+  const [cursorVisible, setCursorVisible] = useState(true);
   // 鼠标停留在控制栏上时暂停自动隐藏，离开后重新开始计时。
   const [controlsHovered, setControlsHovered] = useState(false);
   const [activityTick, setActivityTick] = useState(0);
@@ -441,6 +448,8 @@ export function PlayerDrawer({
     setAudioMenuOpen(false);
     setAudioOutputMenuOpen(false);
     setControlsVisible(false);
+    // 主动收起（单击画面）时光标也立刻隐藏；之后动鼠标会再次显示。
+    setCursorVisible(false);
   }, []);
   const refreshOutputDevices = useCallback(async () => {
     try {
@@ -763,19 +772,68 @@ export function PlayerDrawer({
     }
   }, [episode.id, playerState]);
 
+  useEffect(() => {
+    controlsVisibleRef.current = controlsVisible;
+  }, [controlsVisible]);
+  const videoAspectRef = useRef(videoAspect);
+  useEffect(() => {
+    videoAspectRef.current = videoAspect;
+  }, [videoAspect]);
+
   // 鼠标活动：后端轮询系统光标，视频画面上方的移动也能收到。
+  // 事件携带相对原生画面窗口的物理坐标；换算到网页坐标后只认播放区域内的
+  // 移动，在其他显示器或画面上方动鼠标都不会唤出控制栏。
   useEffect(() => {
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
 
-    onPlayerMouseActivity(() => {
+    onPlayerMouseActivity((activity) => {
       if (disposed) return;
       // 自动连播切集时不让新播放器启动阶段的鼠标移动把控制栏顶出来。
       if (performance.now() < suppressControlsUntilRef.current) return;
       // 点击画面收起控制栏后，留出和收起动画相同的冷却时间，
       // 避免鼠标刚移动就立刻把控制栏弹回来。
       if (performance.now() < controlsCooldownUntilRef.current) return;
+
+      const element = videoRef.current;
+      if (!element) return;
+      const container = element.getBoundingClientRect();
+      const picture = fitToAspect(
+        {
+          x: container.left,
+          y: container.top,
+          width: container.width,
+          height: container.height,
+        },
+        videoAspectRef.current,
+      );
+      if (picture.width <= 0 || activity.width <= 0) return;
+
+      // 物理像素 / CSS 像素 的换算比例；播放区域包含画面四周的黑边。
+      const scale = activity.width / picture.width;
+      const clientX = picture.x + activity.x / scale;
+      const clientY = picture.y + activity.y / scale;
+      if (
+        clientX < container.left ||
+        clientX > container.right ||
+        clientY < container.top ||
+        clientY > container.bottom
+      ) {
+        return;
+      }
+      // 画面内移动就恢复光标、重置隐藏计时；控制栏是另一回事。
+      setCursorVisible(true);
       setActivityTick((tick) => tick + 1);
+
+      // 控制栏已收起时，只有移动到播放区域底部才重新唤出；
+      // 可见时播放区域内的任意移动都重置自动隐藏计时。
+      if (
+        !controlsVisibleRef.current &&
+        clientY <
+          container.top + container.height * CONTROLS_REVEAL_BOTTOM_RATIO
+      ) {
+        return;
+      }
       // 只有鼠标移动才主动唤出控制栏；空格播放/暂停不应唤出。
       setControlsVisible(true);
     }).then((fn) => {
@@ -807,21 +865,18 @@ export function PlayerDrawer({
     };
   }, [hideControls, fullscreen]);
 
-  // 全屏时鼠标静止 2.5 秒收起控制栏；窗口模式不自动收起。
-  // 控制栏已经隐藏时不再因为暂停/播放等状态变化重新出现。
+  // 全屏时鼠标静止 2.5 秒，光标和控制栏一起隐藏；窗口模式不自动收起。
+  // 控制栏收起后光标仍会在鼠标移动时出现，只有在静止后才会一起消失。
   // 鼠标停留在控制栏上（或展开着菜单）时不自动隐藏，离开后再重新计时。
   useEffect(() => {
-    if (!controlsVisible) return;
     if (!fullscreen) return;
-    if (controlsHovered) return;
+    if (!cursorVisible && !controlsVisible) return;
+    if (controlsVisible && controlsHovered) return;
+    if (subtitleMenuOpen || audioMenuOpen || audioOutputMenuOpen) return;
 
     const timer = window.setTimeout(() => {
-      if (!subtitleMenuOpen && !audioMenuOpen && !audioOutputMenuOpen) {
-        setSubtitleMenuOpen(false);
-        setAudioMenuOpen(false);
-        setAudioOutputMenuOpen(false);
-        setControlsVisible(false);
-      }
+      setCursorVisible(false);
+      setControlsVisible(false);
     }, 2500);
 
     return () => window.clearTimeout(timer);
@@ -833,19 +888,25 @@ export function PlayerDrawer({
     audioOutputMenuOpen,
     controlsVisible,
     controlsHovered,
+    cursorVisible,
   ]);
 
-  // 全屏收起控制栏时一并隐藏鼠标指针；重新出现或退出时恢复。
+  // 控制栏可见或退出全屏时，鼠标指针必须可见。
   useEffect(() => {
-    const hideCursor = fullscreen && !controlsVisible;
-    void setPlayerCursorVisible(!hideCursor).catch(() => {});
+    if (!fullscreen || controlsVisible) setCursorVisible(true);
+  }, [fullscreen, controlsVisible]);
+
+  // 把光标状态同步到系统：光标在原生视频窗口上时由 mpv 的自动隐藏计时负责，
+  // WebView 区域（控制栏、黑边）则靠这里的 ShowCursor。
+  useEffect(() => {
+    void setPlayerCursorVisible(cursorVisible).catch(() => {});
 
     return () => {
-      if (hideCursor) {
+      if (!cursorVisible) {
         void setPlayerCursorVisible(true).catch(() => {});
       }
     };
-  }, [fullscreen, controlsVisible]);
+  }, [cursorVisible]);
 
   // 窗口尺寸变化时同步原生视频窗口的位置。
   useEffect(() => {
@@ -1543,12 +1604,13 @@ export function PlayerDrawer({
       } else if (event.key === " ") {
         event.preventDefault();
         togglePlay();
-        // 空格播放/暂停后立即收起控制栏；鼠标移动会把控制栏重新唤出。
+        // 空格播放/暂停后立即收起控制栏和光标；鼠标移动会把光标重新唤出。
         if (fullscreen) {
           setSubtitleMenuOpen(false);
           setAudioMenuOpen(false);
           setAudioOutputMenuOpen(false);
           setControlsVisible(false);
+          setCursorVisible(false);
         }
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
