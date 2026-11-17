@@ -866,8 +866,8 @@ fn normalize(value: &str) -> String {
 fn parse_resolution(title: &str) -> Option<String> {
     static RESOLUTION_P: OnceLock<Regex> = OnceLock::new();
     static RESOLUTION_DIM: OnceLock<Regex> = OnceLock::new();
-    let explicit =
-        RESOLUTION_P.get_or_init(|| Regex::new(r"(?i)\b(2160|1080|720|480)p\b").unwrap());
+    let explicit = RESOLUTION_P
+        .get_or_init(|| Regex::new(r"(?i)\b(2160|1080|720|576|480)p\b").unwrap());
     if let Some(value) = explicit
         .captures(title)
         .and_then(|captures| captures.get(1))
@@ -881,7 +881,7 @@ fn parse_resolution(title: &str) -> Option<String> {
         .captures(title)
         .and_then(|captures| captures.get(1))
         .and_then(|value| value.as_str().parse::<u32>().ok())?;
-    if matches!(height, 2160 | 1080 | 720 | 480) {
+    if matches!(height, 2160 | 1080 | 720 | 576 | 480) {
         Some(format!("{height}p"))
     } else {
         None
@@ -1002,6 +1002,17 @@ mod tests {
         assert_eq!(black.group.as_deref(), Some("黒ネズミたち"));
         assert_eq!(black.resolution.as_deref(), Some("720p"));
         assert_eq!(black.container.as_deref(), Some("MKV"));
+    }
+
+    #[test]
+    fn parses_pal_sd_resolution() {
+        let parsed = parse_release_title(
+            "聪明的一休 Ikkyuu.san.1980.576p.AMZN.WEB-DL.DDP2.0.H264-Emmid",
+        );
+        assert_eq!(parsed.resolution.as_deref(), Some("576p"));
+
+        let dimension = parse_release_title("Show 1024x576 WEB-DL");
+        assert_eq!(dimension.resolution.as_deref(), Some("576p"));
     }
 
     #[test]

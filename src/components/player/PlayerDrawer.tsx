@@ -373,6 +373,8 @@ export function PlayerDrawer({
   const controlsVisibleRef = useRef(controlsVisible);
   // 全屏时鼠标指针跟随鼠标活动显示，静止 2.5 秒后隐藏（控制栏不一定出现）。
   const [cursorVisible, setCursorVisible] = useState(true);
+  // 光标是否停留在画面底部 10% 区域；控制栏的自动收起只看这个状态。
+  const [bottomZoneActive, setBottomZoneActive] = useState(false);
   // 鼠标停留在控制栏上时暂停自动隐藏，离开后重新开始计时。
   const [controlsHovered, setControlsHovered] = useState(false);
   const [activityTick, setActivityTick] = useState(0);
@@ -813,29 +815,28 @@ export function PlayerDrawer({
       const scale = activity.width / picture.width;
       const clientX = picture.x + activity.x / scale;
       const clientY = picture.y + activity.y / scale;
-      if (
-        clientX < container.left ||
-        clientX > container.right ||
-        clientY < container.top ||
-        clientY > container.bottom
-      ) {
-        return;
-      }
-      // 画面内移动就恢复光标、重置隐藏计时；控制栏是另一回事。
+      const inPlayer =
+        clientX >= container.left &&
+        clientX <= container.right &&
+        clientY >= container.top &&
+        clientY <= container.bottom;
+      const inBottomZone =
+        inPlayer &&
+        clientY >=
+          container.top + container.height * CONTROLS_REVEAL_BOTTOM_RATIO;
+      // 控制栏的自动收起只看光标有没有离开底部区域，与鼠标是否静止无关。
+      setBottomZoneActive(inBottomZone);
+      if (!inPlayer) return;
+
+      // 画面内移动就恢复光标、重置静止隐藏计时。
       setCursorVisible(true);
       setActivityTick((tick) => tick + 1);
 
-      // 控制栏已收起时，只有移动到播放区域底部才重新唤出；
-      // 可见时播放区域内的任意移动都重置自动隐藏计时。
-      if (
-        !controlsVisibleRef.current &&
-        clientY <
-          container.top + container.height * CONTROLS_REVEAL_BOTTOM_RATIO
-      ) {
-        return;
-      }
+      // 控制栏已收起时，只有移动到播放区域底部才重新唤出。
       // 只有鼠标移动才主动唤出控制栏；空格播放/暂停不应唤出。
-      setControlsVisible(true);
+      if (inBottomZone && !controlsVisibleRef.current) {
+        setControlsVisible(true);
+      }
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -865,30 +866,44 @@ export function PlayerDrawer({
     };
   }, [hideControls, fullscreen]);
 
-  // 全屏时鼠标静止 2.5 秒，光标和控制栏一起隐藏；窗口模式不自动收起。
-  // 控制栏收起后光标仍会在鼠标移动时出现，只有在静止后才会一起消失。
-  // 鼠标停留在控制栏上（或展开着菜单）时不自动隐藏，离开后再重新计时。
+  // 光标：画面内移动后静止 2.5 秒隐藏；控制栏是否收起与鼠标静止无关。
+  // 鼠标停留在控制栏上（或展开着菜单）时不隐藏，离开后再重新计时。
   useEffect(() => {
-    if (!fullscreen) return;
-    if (!cursorVisible && !controlsVisible) return;
-    if (controlsVisible && controlsHovered) return;
+    if (!fullscreen || !cursorVisible) return;
+    if (controlsHovered) return;
     if (subtitleMenuOpen || audioMenuOpen || audioOutputMenuOpen) return;
 
-    const timer = window.setTimeout(() => {
-      setCursorVisible(false);
-      setControlsVisible(false);
-    }, 2500);
+    const timer = window.setTimeout(() => setCursorVisible(false), 2500);
 
     return () => window.clearTimeout(timer);
   }, [
     fullscreen,
+    cursorVisible,
     activityTick,
+    controlsHovered,
     subtitleMenuOpen,
     audioMenuOpen,
     audioOutputMenuOpen,
+  ]);
+
+  // 控制栏：光标离开画面底部 10% 区域后 2.5 秒自动收起。
+  // 停在底部区域或控制栏上、菜单展开时不收起；与鼠标是否移动无关。
+  useEffect(() => {
+    if (!fullscreen || !controlsVisible) return;
+    if (bottomZoneActive || controlsHovered) return;
+    if (subtitleMenuOpen || audioMenuOpen || audioOutputMenuOpen) return;
+
+    const timer = window.setTimeout(() => setControlsVisible(false), 2500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    fullscreen,
     controlsVisible,
+    bottomZoneActive,
     controlsHovered,
-    cursorVisible,
+    subtitleMenuOpen,
+    audioMenuOpen,
+    audioOutputMenuOpen,
   ]);
 
   // 控制栏可见或退出全屏时，鼠标指针必须可见。
