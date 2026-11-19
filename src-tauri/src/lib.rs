@@ -223,6 +223,7 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::set_library_root,
             commands::settings::set_auto_watch,
+            commands::settings::set_show_scan_progress,
             commands::settings::set_auto_start,
             commands::settings::set_thumbnail_width,
             commands::settings::set_page_transition,

@@ -13,6 +13,7 @@ pub mod managed;
 pub use managed::ManagedQbittorrent;
 
 use std::{
+    path::PathBuf,
     sync::Mutex,
     time::Duration,
 };
@@ -123,6 +124,18 @@ pub struct TorrentInfo {
     /// 任务的基础保存目录，用来筛选当前「下载到」目录。
     #[serde(default)]
     pub save_path: String,
+    /// 任务内容路径：单文件是文件路径，多文件是种子根目录。
+    #[serde(default)]
+    pub content_path: String,
+}
+
+/// `torrents/files` 返回的单个文件进度。
+#[derive(Debug, Deserialize)]
+struct TorrentFileInfo {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    progress: f64,
 }
 
 /// 去掉末尾斜杠并校验协议。
@@ -244,17 +257,7 @@ pub async fn dir_torrents(
     endpoint: &Endpoint,
     save_path: &str,
 ) -> Result<Vec<TorrentInfo>> {
-    let (base, client) = client_for(state, endpoint).await?;
-    let mut response = fetch_torrents(&base, &client).await?;
-
-    if response.status() == reqwest::StatusCode::FORBIDDEN {
-        // 会话过期：丢弃缓存后重试一次。
-        state.invalidate();
-        let (base, client) = client_for(state, endpoint).await?;
-        response = fetch_torrents(&base, &client).await?;
-    }
-
-    let list = parse_torrents(response).await?;
+    let list = all_torrents(state, endpoint).await?;
     let wanted = normalize_path(save_path);
 
     Ok(list
@@ -268,6 +271,102 @@ pub async fn dir_torrents(
             path == wanted || path.starts_with(&(wanted.clone() + "\\"))
         })
         .collect())
+}
+
+async fn all_torrents(
+    state: &QbState,
+    endpoint: &Endpoint,
+) -> Result<Vec<TorrentInfo>> {
+    let (base, client) = client_for(state, endpoint).await?;
+    let mut response = fetch_torrents(&base, &client).await?;
+
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        // 会话过期：丢弃缓存后重试一次。
+        state.invalidate();
+        let (base, client) = client_for(state, endpoint).await?;
+        response = fetch_torrents(&base, &client).await?;
+    }
+
+    parse_torrents(response).await
+}
+
+/// 返回未完成任务里仍在下载的文件路径。
+///
+/// 按 `torrents/files` 的逐文件进度判断，同批种子里已经下好的文件不会
+/// 被一起排除。文件列表接口不可用时退回任务内容路径（整个种子先隐藏）。
+pub async fn downloading_files(
+    state: &QbState,
+    endpoint: &Endpoint,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+
+    for torrent in all_torrents(state, endpoint).await? {
+        if torrent.progress >= 1.0 {
+            continue;
+        }
+
+        match torrent_files(state, endpoint, &torrent.hash).await {
+            Ok(files) => {
+                let save_path = PathBuf::from(&torrent.save_path);
+                for file in files {
+                    let name = file.name.trim().trim_start_matches(['/', '\\']);
+                    if file.progress >= 1.0 || name.is_empty() {
+                        continue;
+                    }
+                    paths.push(save_path.join(name));
+                }
+            }
+            Err(_) => {
+                let fallback = if !torrent.content_path.trim().is_empty() {
+                    PathBuf::from(torrent.content_path.trim())
+                } else if !torrent.name.trim().is_empty() {
+                    PathBuf::from(&torrent.save_path).join(torrent.name.trim())
+                } else {
+                    continue;
+                };
+                paths.push(fallback);
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
+async fn torrent_files(
+    state: &QbState,
+    endpoint: &Endpoint,
+    hash: &str,
+) -> Result<Vec<TorrentFileInfo>> {
+    let (base, client) = client_for(state, endpoint).await?;
+    let mut response = fetch_torrent_files(&base, &client, hash).await?;
+
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        state.invalidate();
+        let (base, client) = client_for(state, endpoint).await?;
+        response = fetch_torrent_files(&base, &client, hash).await?;
+    }
+
+    if !response.status().is_success() {
+        bail!("qBittorrent 返回 HTTP {}", response.status());
+    }
+
+    response
+        .json::<Vec<TorrentFileInfo>>()
+        .await
+        .context("解析 qBittorrent 文件列表失败")
+}
+
+async fn fetch_torrent_files(
+    base: &str,
+    client: &Client,
+    hash: &str,
+) -> Result<reqwest::Response> {
+    client
+        .get(format!("{base}/api/v2/torrents/files"))
+        .query(&[("hash", hash)])
+        .send()
+        .await
+        .context("请求 qBittorrent 文件列表失败")
 }
 
 async fn fetch_torrents(base: &str, client: &Client) -> Result<reqwest::Response> {
@@ -505,7 +604,8 @@ mod tests {
     };
 
     use super::{
-        add_file, add_url, dir_torrents, preferences, set_save_path, Endpoint, QbState,
+        add_file, add_url, dir_torrents, downloading_files, preferences, set_save_path,
+        Endpoint, QbState,
     };
 
     /// 读取一个完整的 HTTP 请求（含表单 body），避免提前关闭连接导致 RST。
@@ -587,6 +687,47 @@ mod tests {
         format!("http://{address}")
     }
 
+    /// mock 一个未完成任务，并让 `torrents/files` 返回逐文件进度。
+    fn spawn_files_mock(requests: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let Ok(mut stream) = stream else {
+                    continue;
+                };
+
+                let request = read_request(&mut stream);
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+
+                let (content_type, body) = if path.starts_with("/api/v2/auth/login") {
+                    ("text/plain", "Ok.".to_string())
+                } else if path.starts_with("/api/v2/torrents/files") {
+                    (
+                        "application/json",
+                        r#"[{"name":"Show/ep1.mkv","progress":1.0},{"name":"Show/ep2.mkv","progress":0.4}]"#
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        "application/json",
+                        r#"[{"hash":"abc","name":"Show","progress":0.4,"state":"downloading","save_path":"D:\\Downloads","content_path":"D:\\Downloads\\Show"}]"#
+                            .to_string(),
+                    )
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nSet-Cookie: SID=test; Path=/\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        format!("http://{address}")
+    }
+
     fn assert_torrent(list: &[super::TorrentInfo]) {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "测试种子");
@@ -624,6 +765,19 @@ mod tests {
             .unwrap();
 
         assert_torrent(&list);
+    }
+
+    #[tokio::test]
+    async fn lists_only_files_still_downloading() {
+        // login + torrents/info + torrents/files
+        let base = spawn_files_mock(3);
+        let state = QbState::default();
+        let endpoint = Endpoint::local(base);
+
+        let paths = downloading_files(&state, &endpoint).await.unwrap();
+        assert_eq!(paths.len(), 1);
+        let path = paths[0].to_string_lossy().replace('/', "\\");
+        assert_eq!(path, "D:\\Downloads\\Show\\ep2.mkv");
     }
 
     #[tokio::test]

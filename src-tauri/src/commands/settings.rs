@@ -27,6 +27,8 @@ pub struct AppSettings {
     /// 应用数据根目录，前端用它拼接缩略图路径。
     pub data_root: String,
     pub auto_watch: bool,
+    /// 扫描时是否显示底部进度条。
+    pub show_scan_progress: bool,
     pub auto_start: bool,
     pub thumbnail_width: u32,
     /// 页面切换动画：`fade` 或 `slide`。
@@ -105,6 +107,18 @@ pub fn set_auto_watch(
     } else {
         watcher::stop(&app);
     }
+
+    to_app_settings(state.inner(), settings)
+}
+
+#[tauri::command]
+pub fn set_show_scan_progress(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppSettings, String> {
+    let mut settings = settings::load(&state.data_root).map_err(to_message)?;
+    settings.show_scan_progress = enabled;
+    settings::save(&state.data_root, &settings).map_err(to_message)?;
 
     to_app_settings(state.inner(), settings)
 }
@@ -307,6 +321,7 @@ fn to_app_settings(state: &AppState, settings: Settings) -> Result<AppSettings, 
         library_id,
         data_root: state.data_root.display().to_string(),
         auto_watch: settings.auto_watch,
+        show_scan_progress: settings.show_scan_progress,
         auto_start: settings.auto_start,
         thumbnail_width: settings.thumbnail_width,
         page_transition: settings.page_transition,

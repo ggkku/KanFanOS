@@ -119,9 +119,25 @@ pub fn cleanup_invalid_series(
 }
 
 /// 扫描是阻塞操作，放到后台线程执行；进度通过事件推送。
-#[tauri::command(async)]
-pub fn scan_library(app: AppHandle, library_id: i64) -> Result<ScanSummary, String> {
-    scanner::scan(&app, library_id).map_err(to_message)
+///
+/// 手动扫描也先查询 qBittorrent 的未完成文件：否则用户点一次「重新扫描」
+/// 就会把下载中的半成品重新加回选集页面，并触发媒体处理失败。
+#[tauri::command]
+pub async fn scan_library(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    library_id: i64,
+) -> Result<ScanSummary, String> {
+    let root = state.db.library_root(library_id).map_err(to_message)?;
+    let downloading =
+        crate::watcher::downloading_paths_for(&app, Path::new(&root)).await;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        scanner::scan(&app, library_id, &downloading)
+    })
+    .await
+    .map_err(|error| format!("扫描线程失败：{error}"))?
+    .map_err(to_message)
 }
 
 #[tauri::command]

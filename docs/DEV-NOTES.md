@@ -217,6 +217,16 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 下载目录默认是 `<data_root>\qbittorrent\qBittorrent\downloads`（qBittorrent 自定义 profile 的默认下载位置）。卸载器不会删 `qbittorrent\`，和数据库一样保留。
 - 内置 `qbittorrent.exe` 来自官方 Release 5.3.0，分发需遵守 GPLv3+：许可证随包放在 `qbittorrent-COPYING.txt`，源码地址写在 README。升级版本时同步更新 `scripts/fetch-sidecars.mjs` 里的版本号和 SHA256。
 
+## 1.3.8 全屏退出动画与自动同步时机修复
+
+- **退出全屏控制栏闪跳**：窗口模式从 1.3.6 起抽屉宽度有 640px 下限，视频区域可能比 16:9 画面宽（左右留黑边）。全屏 FLIP 动画原先让控制栏宽度跟随 `fitToAspect` 后的画面框，退出时先缩到画面宽度（如 576px），动画结束恢复布局又跳到抽屉宽度（640px）。现在控制栏宽度直接跟随视频区域矩形，起点和终点都与真实布局一致，不再闪跳；原生视频窗口仍按画面适配框同步。
+- **自动同步跳过写入中的文件**：`scan_quiet` 只收录修改时间已静默 10 秒（`AUTO_SETTLE`）且非 0 字节的文件。内置 qBittorrent 刚添加任务会先创建目标文件，外部下载器和 U 盘复制也会持续写同一个文件；以前监听器在 1.5 秒防抖后就扫描，半成品进入索引，FFprobe/FFmpeg 连续失败并反复弹出「N 个失败」。现在半成品留在索引外，watcher 在 `ScanSummary.deferred > 0` 时按静默期补扫一次；0 字节文件不安排补扫，避免空文件造成循环扫描。
+- 跳过写入中的文件不等于文件被删除：扫描结束前 `Database::keep_active_paths` 把这些路径从 `checking` 恢复为 `active`，下载/替换期间剧集不会在界面上短暂消失。
+- 手动「重新扫描」仍按磁盘当前状态执行（`settle = None`），不受静默期影响；但 qBittorrent 未完成文件同样会查询并隐藏，避免点一次重新扫描又把半成品加回选集。
+- **下载中的文件不进入选集**：自动同步前先查询 qBittorrent（内置实例只在已运行时查询，不顺手启动；外部 WebUI 按配置连接），用 `torrents/info` 的 `progress < 1` 找出未完成任务，再用 `torrents/files` 的逐文件进度得到真正的未完成文件路径。扫描跳过的同时调用 `Database::hide_paths` 把已有记录标记为 `missing`，选集页面立即不显示；下载完成后 `upsert_videos` 会重新置为 `active`。同一批种子里已经下好的文件不会一起隐藏。文件列表接口不可用时退回 `content_path`（整个种子目录先隐藏）。查询超时 3 秒，失败则退回静默期判断；有未完成任务时每 180 秒兜底复查一次，正常完成仍由文件事件触发。
+- 设置页新增「扫描进度条」开关（`show_scan_progress`，默认开启），关闭后 `App` 不再渲染底部 `ScanBanner`；元数据/缩略图进度条（`MediaBanner`）不受影响。
+- 设置页「版本」从 `getVersion()` 读取 `tauri.conf.json` 的版本，不再硬编码（此前一直显示 1.3.4）。
+
 ## 1.3.7 内置 qBittorrent WebUI 打开下载目录与关闭残留修复
 
 - **集数解析改为数字段置信度打分**：旧的 `find_episode` 是「按正则依次匹配 + 首个命中」，`Season 2`、`Show 2 [06]` 这类命名只能靠 ` - ` 特判，覆盖不全。现在 `episode_names::numeric_candidates` 把标题里的每个数字段都当成候选，分别累加「像集数」和「像季数」的特征分，再取 `episode_score - season_score` 最高且为正的那个。明确标记（`SxxExx`、`EP06`、`#6`、`第6话`）仍然直接返回，不参与竞争。

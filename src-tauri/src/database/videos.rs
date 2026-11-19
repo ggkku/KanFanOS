@@ -166,6 +166,86 @@ impl Database {
         Ok(missing)
     }
 
+    /// 把 qBittorrent 仍在下载的路径标记为 missing，让选集页面不显示
+    /// 未下载完的文件。
+    ///
+    /// 只处理当前媒体库里还未缺失的记录；下载完成后，扫描的
+    /// `upsert_videos` 会重新写回 `active`。
+    pub fn hide_paths(&self, library_id: i64, prefixes: &[String]) -> Result<usize> {
+        if prefixes.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn()?;
+        let rows = {
+            let mut stmt = conn.prepare(
+                "SELECT id, path FROM videos
+                  WHERE library_id = ?1 AND status <> 'missing'",
+            )?;
+            let rows = stmt.query_map([library_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let ids: Vec<i64> = rows
+            .into_iter()
+            .filter(|(_, path)| {
+                let key = path
+                    .replace('/', "\\")
+                    .trim_end_matches('\\')
+                    .to_ascii_lowercase();
+                prefixes.iter().any(|prefix| {
+                    key == *prefix
+                        || key
+                            .strip_prefix(prefix)
+                            .is_some_and(|rest| rest.starts_with('\\'))
+                })
+            })
+            .map(|(id, _)| id)
+            .collect();
+
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE videos SET status = 'missing' WHERE id = ?1")?;
+            for id in &ids {
+                stmt.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
+    /// 自动同步跳过仍在写入的文件时，保留它们原来的索引状态。
+    ///
+    /// 扫描开始时所有记录都被置为 `checking`，这些文件没有参与本轮扫描
+    /// （不是被删除），必须在缺失判定前恢复为 `active`，否则下载/复制期间
+    /// 剧集会在界面上短暂消失。
+    pub fn keep_active_paths(&self, library_id: i64, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE videos SET status = 'active'
+                  WHERE library_id = ?1 AND status = 'checking' AND path = ?2",
+            )?;
+            for path in paths {
+                stmt.execute(params![library_id, path])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 扫描被取消或失败：不做缺失判定，把检查中的记录恢复为 active。
     pub fn abort_library_scan(&self, library_id: i64) -> Result<()> {
         self.conn()?.execute(

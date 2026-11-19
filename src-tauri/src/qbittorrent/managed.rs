@@ -80,6 +80,16 @@ impl ManagedQbittorrent {
         }
     }
 
+    /// 内置实例正在运行时返回 WebUI 根地址；不会启动新实例。
+    ///
+    /// 文件监听器用它查询下载进度，不能因为一次自动扫描就把 qBittorrent
+    /// 拉起来。
+    pub fn base_if_running(&self) -> Option<String> {
+        let mut guard = self.inner.try_lock().ok()?;
+        let running = guard.as_mut()?;
+        matches!(running.child.try_wait(), Ok(None)).then(|| running.base())
+    }
+
     /// 提前请求内置实例关闭，但不等待进程退出。
     ///
     /// 退出动画播放期间调用，和界面动画并行，真正 `stop` 时通常已经关得差不多了。

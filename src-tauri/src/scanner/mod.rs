@@ -10,7 +10,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
@@ -38,6 +38,14 @@ pub(crate) fn is_video_extension(extension: &str) -> bool {
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(extension))
 }
+
+/// 自动同步只收录已经静默这么久的文件。
+///
+/// qBittorrent 新建任务、外部下载器写文件、从 U 盘复制视频时，目标文件会先
+/// 出现再持续写入。此时按扩展名就能匹配到视频，但元数据/缩略图一定会失败。
+/// 自动同步跳过还在变化的文件，等 watcher 下一次补扫再收录；手动扫描仍然
+/// 按磁盘当前状态执行。
+pub(crate) const AUTO_SETTLE: Duration = Duration::from_secs(10);
 
 /// 每批写入条数，见设计文档 §5.2。
 const BATCH_SIZE: usize = 1000;
@@ -69,6 +77,10 @@ pub struct ScanSummary {
     pub files_added: u64,
     pub errors: u64,
     pub missing: usize,
+    /// 自动同步时因文件仍在写入而跳过的数量。
+    pub deferred: usize,
+    /// 本次扫描因 qBittorrent 仍在下载而排除的路径数量。
+    pub downloading: usize,
     pub cancelled: bool,
     pub elapsed_ms: u64,
 }
@@ -84,24 +96,54 @@ impl Drop for ScanGuard<'_> {
     }
 }
 
-pub fn scan(app: &AppHandle, library_id: i64) -> Result<ScanSummary> {
+pub fn scan(
+    app: &AppHandle,
+    library_id: i64,
+    downloading: &[PathBuf],
+) -> Result<ScanSummary> {
     let state = app.state::<AppState>();
 
-    scan_with_state(state.inner(), library_id, &mut |progress| {
-        // 事件发送失败不应中断扫描（窗口可能已关闭）。
-        let _ = app.emit(PROGRESS_EVENT, progress);
-    })
+    scan_with_state(
+        state.inner(),
+        library_id,
+        None,
+        downloading,
+        &mut |progress| {
+            // 事件发送失败不应中断扫描（窗口可能已关闭）。
+            let _ = app.emit(PROGRESS_EVENT, progress);
+        },
+    )
 }
 
 /// 文件监听触发的静默扫描：不发送逐条进度事件，避免界面闪烁。
-pub fn scan_quiet(app: &AppHandle, library_id: i64) -> Result<ScanSummary> {
+///
+/// 自动同步跳过仍在写入的文件：内置 qBittorrent 刚添加任务时文件已经存在，
+/// 外部下载器/复制操作也会持续改同一个文件；先把它们留在索引外，等静默后
+/// 由 watcher 补扫，避免半成品触发一串媒体处理失败。
+///
+/// `downloading` 是 qBittorrent 报告仍在下载的文件/目录路径。它们不仅不
+/// 进入索引，已有的索引记录也会被标记为 missing，这样选集页面不会显示
+/// 未下载完的文件；下载完成后再由下一次扫描恢复。
+pub fn scan_quiet(
+    app: &AppHandle,
+    library_id: i64,
+    downloading: &[PathBuf],
+) -> Result<ScanSummary> {
     let state = app.state::<AppState>();
-    scan_with_state(state.inner(), library_id, &mut |_| {})
+    scan_with_state(
+        state.inner(),
+        library_id,
+        Some(AUTO_SETTLE),
+        downloading,
+        &mut |_| {},
+    )
 }
 
 fn scan_with_state(
     state: &AppState,
     library_id: i64,
+    settle: Option<Duration>,
+    downloading: &[PathBuf],
     on_progress: &mut dyn FnMut(ScanProgress),
 ) -> Result<ScanSummary> {
     if state
@@ -117,7 +159,7 @@ fn scan_with_state(
         scan: &state.scan,
     };
 
-    let result = run(state, library_id, on_progress);
+    let result = run(state, library_id, settle, downloading, on_progress);
     if result.is_err() {
         // 出错时不留下半截 checking 状态。
         let _ = state.db.abort_library_scan(library_id);
@@ -136,9 +178,91 @@ struct ScanContext<'a> {
     errors: u64,
     batch: Vec<ScannedFile>,
     seen_categories: HashSet<String>,
+    /// 自动同步的文件静默期；`None` 表示手动扫描。
+    settle: Option<Duration>,
+    started_ms: i64,
+    /// 仍在写入、需要等下一次扫描再收录的文件。
+    deferred_paths: Vec<String>,
+    /// 其中需要 watcher 定时补扫的数量（排除永久 0 字节文件）。
+    deferred: usize,
+    /// qBittorrent 仍在下载的路径（已统一分隔符、小写）。
+    downloading: Vec<String>,
+}
+
+/// 路径比较键：统一斜杠、去掉末尾分隔符并转小写。
+fn path_key(path: &str) -> String {
+    path.replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// 判断路径是否等于排除路径，或位于排除目录之下。
+fn path_matches(path: &str, prefix: &str) -> bool {
+    if path == prefix {
+        return true;
+    }
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('\\'))
 }
 
 impl ScanContext<'_> {
+    /// qBittorrent 报告该路径仍在下载：不收录，并把已有记录隐藏。
+    fn is_downloading(&self, path: &Path) -> bool {
+        if self.downloading.is_empty() {
+            return false;
+        }
+        let key = path_key(&path.to_string_lossy());
+        self.downloading
+            .iter()
+            .any(|prefix| path_matches(&key, prefix))
+    }
+
+    /// 自动同步时跳过仍在写入的文件。
+    ///
+    /// 返回 `true` 时调用方直接跳过这个文件，不写入索引；如果它已经在数据库
+    /// 里，`run` 结束前会把状态恢复为 active，避免下载过程中短暂显示缺失。
+    fn defer_if_unsettled(
+        &mut self,
+        path: &Path,
+        metadata: &fs::Metadata,
+    ) -> bool {
+        let Some(settle) = self.settle else {
+            return false;
+        };
+
+        let settle_ms = settle.as_millis() as i64;
+        let started_ms = self.started_ms;
+        // 时间在未来（复制工具保留时间戳、系统时钟偏差）视为已完成，
+        // 否则会永远落在静默期内。
+        let recent = |time: Option<i64>| {
+            time.is_some_and(|time| {
+                time <= started_ms && started_ms - time < settle_ms
+            })
+        };
+
+        let unsettled = if metadata.len() == 0 {
+            // 下载器/复制工具刚创建文件，还没写入数据。等后续写入事件即可，
+            // 不安排重试，避免永久空文件造成反复扫描。
+            true
+        } else {
+            // `modified` 覆盖下载器边下边写；`created` 覆盖复制工具保留源
+            // 修改时间（目标文件刚创建但 mtime 可能是旧的）的情况。
+            recent(metadata.modified().ok().and_then(system_time_to_ms))
+                || recent(metadata.created().ok().and_then(system_time_to_ms))
+        };
+
+        if !unsettled {
+            return false;
+        }
+
+        if metadata.len() > 0 {
+            self.deferred += 1;
+        }
+        self.deferred_paths
+            .push(path.to_string_lossy().into_owned());
+        true
+    }
+
     fn push_file(&mut self, file: ScannedFile, current: &Path) -> Result<()> {
         self.batch.push(file);
         self.files_found += 1;
@@ -191,9 +315,17 @@ impl ScanContext<'_> {
 fn run(
     state: &AppState,
     library_id: i64,
+    settle: Option<Duration>,
+    downloading: &[PathBuf],
     on_progress: &mut dyn FnMut(ScanProgress),
 ) -> Result<ScanSummary> {
     let started = Instant::now();
+    let started_ms = now_ms();
+    let downloading: Vec<String> = downloading
+        .iter()
+        .map(|path| path_key(&path.to_string_lossy()))
+        .filter(|path| !path.is_empty())
+        .collect();
     let root = state.db.library_root(library_id)?;
     let root_path = PathBuf::from(&root);
 
@@ -215,6 +347,11 @@ fn run(
         errors: 0,
         batch: Vec::with_capacity(BATCH_SIZE),
         seen_categories: HashSet::new(),
+        settle,
+        started_ms,
+        deferred_paths: Vec::new(),
+        deferred: 0,
+        downloading,
     };
     ctx.emit("scanning", None);
 
@@ -312,6 +449,21 @@ fn run(
     }
 
     ctx.flush()?;
+
+    // qBittorrent 仍在下载的文件不进入选集页面。它们可能已经在旧索引里，
+    // 这里先标记为 missing；下载完成后的扫描会用 upsert 恢复为 active。
+    if !ctx.downloading.is_empty() {
+        state.db.hide_paths(library_id, &ctx.downloading)?;
+    }
+
+    // 仍在写入的文件没有进入本次扫描，但它们只是暂时跳过，不是被删除。
+    // 先把它们的记录从 checking 恢复为 active，避免下载过程中被标记缺失。
+    if !ctx.deferred_paths.is_empty() {
+        state
+            .db
+            .keep_active_paths(library_id, &ctx.deferred_paths)?;
+    }
+
     let cancelled = state.scan.is_cancelled();
 
     let missing = if cancelled {
@@ -332,6 +484,8 @@ fn run(
         files_added: (rows_after - rows_before).max(0) as u64,
         errors: ctx.errors,
         missing,
+        deferred: ctx.deferred,
+        downloading: ctx.downloading.len(),
         cancelled,
         elapsed_ms: started.elapsed().as_millis() as u64,
     };
@@ -396,6 +550,13 @@ fn scan_series(
         };
 
         let path = entry.path();
+        if ctx.is_downloading(&path) {
+            continue;
+        }
+        if ctx.defer_if_unsettled(&path, &metadata) {
+            continue;
+        }
+
         let is_root_file = path.parent().map(|parent| parent == dir).unwrap_or(false);
         let relative = series_config::relative_path(dir, path);
         let kind = series_config::classify_kind(
@@ -459,6 +620,12 @@ fn scan_loose_series(
                 continue;
             }
         };
+        if ctx.is_downloading(&path) {
+            continue;
+        }
+        if ctx.defer_if_unsettled(&path, &metadata) {
+            continue;
+        }
         let filename = path
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
@@ -493,7 +660,7 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::Ordering,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::scan_with_state;
@@ -552,7 +719,7 @@ mod tests {
         let (state, library_id) = open_state(&root);
         let mut noop = |_| {};
 
-        let stats = scan_with_state(&state, library_id, &mut noop).unwrap();
+        let stats = scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
         assert_eq!(stats.series_found, 2);
 
         let categories = state.db.list_categories(library_id).unwrap();
@@ -586,7 +753,7 @@ mod tests {
         let (state, library_id) = open_state(&root);
         let mut noop = |_| {};
 
-        let first = scan_with_state(&state, library_id, &mut noop).unwrap();
+        let first = scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
         assert_eq!(first.series_found, 2);
         assert_eq!(first.files_found, 3);
         assert_eq!(first.files_added, 3);
@@ -628,7 +795,7 @@ mod tests {
         )
         .unwrap();
 
-        let _ = scan_with_state(&state, library_id, &mut noop).unwrap();
+        let _ = scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
 
         let edited = state
             .db
@@ -651,13 +818,96 @@ mod tests {
         fs::remove_file(root.join("2026年7月新番").join("测试番").join("第2集.mkv")).unwrap();
         fs::write(root.join("2026年7月新番").join("测试番").join("第3集.mp4"), b"3").unwrap();
 
-        let second = scan_with_state(&state, library_id, &mut noop).unwrap();
+        let second = scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
         assert_eq!(second.files_found, 3);
         assert_eq!(second.files_added, 1);
         assert_eq!(second.missing, 1);
 
         let scheduled = state.db.list_series_page(library_id, "2026年7月", "name", 100, 0).unwrap().items;
         assert_eq!(scheduled[0].episode_count, 2);
+
+        drop(state);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn automatic_scan_defers_files_still_being_written() {
+        let root = test_dir("settle");
+        let _ = fs::remove_dir_all(&root);
+        let series_dir = root.join("番剧");
+        fs::create_dir_all(&series_dir).unwrap();
+        fs::write(series_dir.join("第1集.mp4"), b"partial").unwrap();
+
+        let (state, library_id) = open_state(&root);
+        let mut noop = |_| {};
+
+        // 先按手动扫描收录，模拟文件已经在索引里。
+        scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
+
+        // 刚写入的文件还在自动同步的静默期内：跳过，但不能判定为缺失。
+        let auto = scan_with_state(
+            &state,
+            library_id,
+            Some(Duration::from_secs(10)),
+            &[],
+            &mut noop,
+        )
+        .unwrap();
+        assert_eq!(auto.files_found, 0);
+        assert_eq!(auto.deferred, 1);
+        assert_eq!(auto.missing, 0);
+
+        let page = state
+            .db
+            .list_series_page(library_id, UNKNOWN_CATEGORY, "name", 100, 0)
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].episode_count, 1);
+
+        drop(state);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn automatic_scan_hides_files_still_downloading() {
+        let root = test_dir("downloading");
+        let _ = fs::remove_dir_all(&root);
+        let series_dir = root.join("番剧");
+        fs::create_dir_all(&series_dir).unwrap();
+        fs::write(series_dir.join("第1集.mp4"), b"done").unwrap();
+        fs::write(series_dir.join("第2集.mp4"), b"partial").unwrap();
+
+        let (state, library_id) = open_state(&root);
+        let mut noop = |_| {};
+
+        scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
+        let page = state
+            .db
+            .list_series_page(library_id, UNKNOWN_CATEGORY, "name", 100, 0)
+            .unwrap();
+        let series_id = page.items[0].id;
+        assert_eq!(state.db.list_episodes(series_id).unwrap().len(), 2);
+
+        // qBittorrent 报告第 2 集仍在下载：本次扫描不收录它，并且已有记录
+        // 要隐藏，选集页面只剩第 1 集。
+        let downloading = [series_dir.join("第2集.mp4")];
+        let hidden = scan_with_state(
+            &state,
+            library_id,
+            None,
+            &downloading,
+            &mut noop,
+        )
+        .unwrap();
+        assert_eq!(hidden.files_found, 1);
+        assert_eq!(hidden.downloading, 1);
+        let episodes = state.db.list_episodes(series_id).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].filename, "第1集.mp4");
+
+        // 下载完成后再扫描，记录恢复。
+        scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
+        assert_eq!(state.db.list_episodes(series_id).unwrap().len(), 2);
 
         drop(state);
         let _ = fs::remove_dir_all(&root);
@@ -673,7 +923,7 @@ mod tests {
         let (state, library_id) = open_state(&root);
         state.scan.cancel.store(true, Ordering::Release);
 
-        let summary = scan_with_state(&state, library_id, &mut |_| {}).unwrap();
+        let summary = scan_with_state(&state, library_id, None, &[], &mut |_| {}).unwrap();
         assert!(summary.cancelled);
         assert_eq!(summary.missing, 0);
 
@@ -692,7 +942,7 @@ mod tests {
 
         let (state, library_id) = open_state(&root);
         let mut noop = |_| {};
-        scan_with_state(&state, library_id, &mut noop).unwrap();
+        scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
 
         let page = state
             .db
@@ -729,7 +979,7 @@ mod tests {
 
         let (state, library_id) = open_state(&root);
         let mut noop = |_| {};
-        scan_with_state(&state, library_id, &mut noop).unwrap();
+        scan_with_state(&state, library_id, None, &[], &mut noop).unwrap();
 
         let page = state
             .db
@@ -792,7 +1042,7 @@ mod tests {
         let expected = categories * series_per_category * episodes_per_series;
 
         let started = Instant::now();
-        let summary = scan_with_state(&state, library_id, &mut |_| {}).unwrap();
+        let summary = scan_with_state(&state, library_id, None, &[], &mut |_| {}).unwrap();
         let elapsed = started.elapsed();
 
         eprintln!(
@@ -835,7 +1085,7 @@ mod tests {
             data_root: work.join("appdata"),
         };
 
-        let summary = scan_with_state(&state, library.id, &mut |_| {}).unwrap();
+        let summary = scan_with_state(&state, library.id, None, &[], &mut |_| {}).unwrap();
         eprintln!("summary: {summary:#?}");
 
         for category in state.db.list_categories(library.id).unwrap() {

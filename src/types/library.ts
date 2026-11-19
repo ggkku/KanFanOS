@@ -24,6 +24,7 @@ export interface AppSettings {
   libraryId: number | null;
   dataRoot: string;
   autoWatch: boolean;
+  showScanProgress: boolean;
   autoStart: boolean;
   thumbnailWidth: number;
   pageTransition: PageTransition;

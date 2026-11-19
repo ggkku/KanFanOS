@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { getVersion } from "@tauri-apps/api/app";
 import {
+  Activity,
   AppWindow,
   ArrowUpDown,
   Clapperboard,
@@ -39,6 +41,7 @@ import {
   setAutoWatch,
   setPageTransition,
   setSeriesTransition,
+  setShowScanProgress,
   setThumbnailWidth,
   setWindowMode,
   startMediaProcessing,
@@ -148,6 +151,22 @@ export function SettingsPage({
   const [error, setError] = useState<string | null>(null);
   const [quitting, setQuitting] = useState(false);
   const [qbAdvanced, setQbAdvanced] = useState(false);
+  // 版本号从 Tauri 配置读取，避免每次发版都要改硬编码字符串。
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    void getVersion()
+      .then((version) => {
+        if (!disposed) setAppVersion(version);
+      })
+      .catch(() => {
+        // 读取失败时只显示产品名。
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -222,6 +241,18 @@ export function SettingsPage({
 
     try {
       const next = await setAutoWatch(!settings.autoWatch);
+      onSettingsChange(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const toggleShowScanProgress = async () => {
+    if (!settings) return;
+    setError(null);
+
+    try {
+      const next = await setShowScanProgress(!settings.showScanProgress);
       onSettingsChange(next);
     } catch (err) {
       setError(errorMessage(err));
@@ -507,6 +538,26 @@ export function SettingsPage({
         </div>
 
         <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
+          <Activity size={16} className="shrink-0 text-neutral-500" />
+          <div className="w-20 shrink-0 text-xs text-neutral-500">
+            扫描进度条
+          </div>
+          <div className="min-w-0 flex-1 text-xs text-neutral-300">
+            {settings?.showScanProgress
+              ? "已开启 · 扫描时显示底部进度条"
+              : "已关闭 · 扫描时不再显示进度条"}
+          </div>
+          <button
+            type="button"
+            onClick={() => void toggleShowScanProgress()}
+            disabled={!settings}
+            className={actionButton}
+          >
+            {settings?.showScanProgress ? "关闭" : "开启"}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
           <Power size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">
             开机自启动
@@ -721,7 +772,11 @@ export function SettingsPage({
               : "读取中…"
           }
         />
-        <InfoRow icon={Info} label="版本" value="KanFanOS 1.3.4" />
+        <InfoRow
+          icon={Info}
+          label="版本"
+          value={appVersion ? `KanFanOS ${appVersion}` : "KanFanOS"}
+        />
       </section>
 
       {error && (

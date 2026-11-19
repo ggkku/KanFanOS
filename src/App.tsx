@@ -1471,7 +1471,7 @@ function App() {
 
       {(progress || mediaProgress) && (
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4">
-          {progress && (
+          {progress && settings?.showScanProgress !== false && (
             <div className="pointer-events-auto w-full max-w-2xl">
               <ScanBanner
                 progress={progress}

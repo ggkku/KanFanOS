@@ -55,6 +55,10 @@ export function setAutoWatch(enabled: boolean): Promise<AppSettings> {
   return invoke<AppSettings>("set_auto_watch", { enabled });
 }
 
+export function setShowScanProgress(enabled: boolean): Promise<AppSettings> {
+  return invoke<AppSettings>("set_show_scan_progress", { enabled });
+}
+
 export function setAutoStart(enabled: boolean): Promise<AppSettings> {
   return invoke<AppSettings>("set_auto_start", { enabled });
 }

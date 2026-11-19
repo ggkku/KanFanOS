@@ -78,6 +78,9 @@ pub struct Settings {
     /// 是否监听目录变化并自动同步。
     #[serde(default = "default_auto_watch")]
     pub auto_watch: bool,
+    /// 扫描时是否显示底部进度条。
+    #[serde(default = "default_show_scan_progress")]
+    pub show_scan_progress: bool,
     /// 是否在 Windows 登录后自动启动。
     #[serde(default)]
     pub auto_start: bool,
@@ -100,6 +103,10 @@ pub struct Settings {
 
 fn default_auto_watch() -> bool {
     false
+}
+
+fn default_show_scan_progress() -> bool {
+    true
 }
 
 fn default_thumbnail_width() -> u32 {
@@ -169,6 +176,7 @@ impl Default for Settings {
         Self {
             library_root: None,
             auto_watch: default_auto_watch(),
+            show_scan_progress: default_show_scan_progress(),
             auto_start: false,
             thumbnail_width: default_thumbnail_width(),
             page_transition: default_page_transition(),
@@ -266,6 +274,7 @@ mod tests {
         let settings = load(&dir).unwrap();
         assert_eq!(settings.library_root.as_deref(), Some("X:\\番"));
         assert!(!settings.auto_watch);
+        assert!(settings.show_scan_progress);
         assert!(!settings.auto_start);
         assert_eq!(settings.thumbnail_width, 480);
         assert_eq!(settings.page_transition, PAGE_TRANSITION_SLIDE);
@@ -285,6 +294,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -301,6 +311,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -324,6 +335,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_FLIP.to_string(),
@@ -340,6 +352,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: "bogus".to_string(),
@@ -363,6 +376,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_SLIDE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -379,6 +393,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 480,
                 page_transition: "unknown".to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -402,6 +417,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: false,
+                show_scan_progress: true,
                 thumbnail_width: 5000,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -418,6 +434,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
+                show_scan_progress: true,
                 thumbnail_width: 1,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),

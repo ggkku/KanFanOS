@@ -1416,30 +1416,21 @@ export function PlayerDrawer({
       // 全屏切换：范围大，用 CSS transform + expo-out，逐帧采样同步。
       flipAnimRef.current?.cancel();
 
-      // 控制栏每帧直接跟随视频当前矩形：宽度、左位置、上位置都从
-      // 视频矩形算出来，保证控制栏中点和画面中点始终一致，并且和原生
-      // 窗口使用同一帧的采样值。
+      // 控制栏每帧直接跟随视频区域矩形：宽度、左位置、上位置都从
+      // 视频区域算出来，保证控制栏始终和抽屉里的视频区域同宽，并且和
+      // 原生窗口使用同一帧的采样值。
       const controls = controlsRef.current;
       const controlsTo = controls?.getBoundingClientRect() ?? null;
 
       // 在第一次绘制前就把控制栏放到视频的起始矩形上，
       // 否则第一帧会先显示终态布局，下一帧才跳回起点，看起来像慢一拍。
       if (controls && controlsTo) {
-        // 进入全屏沿用视频区域矩形；退出全屏跟随画面适配框。
-        const prevBox = fullscreen
-          ? { x: prev.left, width: prev.width }
-          : fitToAspect(
-              {
-                x: prev.left,
-                y: prev.top,
-                width: prev.width,
-                height: prev.height,
-              },
-              videoAspect,
-            );
-        controls.style.width = `${prevBox.width}px`;
+        // 控制栏始终和视频区域同宽。窗口模式下视频区域可能比画面宽
+        // （左右留黑边），此时不能按画面适配框收窄，否则退出全屏会先
+        // 缩到未加宽的宽度，动画结束再跳回抽屉宽度。
+        controls.style.width = `${prev.width}px`;
         controls.style.transform = `translate(${
-          prevBox.x - controlsTo.left
+          prev.left - controlsTo.left
         }px, ${prev.bottom - controlsTo.top}px)`;
       }
 
@@ -1507,21 +1498,19 @@ export function PlayerDrawer({
 
           progress = Math.min(1, Math.max(0, progress));
 
-          // 进入全屏沿用视频区域矩形（已调好的效果）；
-          // 退出全屏跟随画面适配框，和原生视频窗口的收缩速度一致。
+          // 控制栏跟随视频区域（而不是按宽高比收缩后的画面），
+          // 这样退出全屏时抽屉加宽后的宽度也是动画终点，不会在
+          // 动画结束的瞬间闪一下。原生视频窗口仍按画面适配框同步。
           const area = {
             x: prev.left + (next.left - prev.left) * progress,
             y: prev.top + (next.top - prev.top) * progress,
             width: prev.width + (next.width - prev.width) * progress,
             height: prev.height + (next.height - prev.height) * progress,
           };
-          const box = fullscreen
-            ? { x: area.x, width: area.width }
-            : fitToAspect(area, videoAspect);
 
-          controls.style.width = `${box.width}px`;
+          controls.style.width = `${area.width}px`;
           controls.style.transform = `translate(${
-            box.x - controlsTo.left
+            area.x - controlsTo.left
           }px, ${area.y + area.height - controlsTo.top}px)`;
         }
 
