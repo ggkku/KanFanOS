@@ -86,7 +86,7 @@ pnpm sidecars
 安装包输出：
 
 ```text
-src-tauri/target/release/bundle/nsis/KanFanOS_1.3.6_x64-setup.exe
+src-tauri/target/release/bundle/nsis/KanFanOS_1.3.8_x64-setup.exe
 ```
 
 > 内置 mpv、FFmpeg 和 qBittorrent 后安装包约 200 MB；MSI 打包需要下载 WiX，网络受限时可能失败，可只用 NSIS。
@@ -415,6 +415,7 @@ KanFanOS 读取一个番剧根目录，支持三种结构：
 - 自动更新索引跳过仍在写入的文件：qBittorrent 刚添加任务、外部下载器或 U 盘复制期间，半成品不再进入索引，避免反复提示元数据/缩略图处理失败
 - 仍在写入的文件保留原有索引；下载完成后由文件监听器在静默期后自动补扫收录，不需要手动重新扫描
 - 下载中的 qBittorrent 文件按逐文件进度从选集页面隐藏：同批种子里已下好的集数不受影响，下载完成后自动恢复显示
+- 「其他视频」按文件名/目录识别 OVA、SP、NCOP/NCED、OP/ED、PV/CM、EXTRA，显示类型徽章和筛选按钮，播放按类型分组
 - 设置页新增「后台进度条」开关，可关闭扫描与缩略图/元数据处理的底部进度条
 - 设置页「版本」改为从应用配置读取，不再固定显示 1.3.4
 - 版本号提升到 1.3.8
