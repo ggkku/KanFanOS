@@ -958,6 +958,7 @@ mod tests {
         assert_eq!(main[0].filename, "第1集.mp4");
         assert_eq!(extras.len(), 1);
         assert_eq!(extras[0].filename, "特典.mp4");
+        assert_eq!(extras[0].extra_kind.as_deref(), Some("PV/CM"));
 
         drop(state);
         let _ = fs::remove_dir_all(&root);
@@ -994,6 +995,7 @@ mod tests {
         assert_eq!(main[0].filename, "第1集.mp4");
         assert_eq!(extras.len(), 1);
         assert_eq!(extras[0].filename, "下载的种子.mp4");
+        assert_eq!(extras[0].extra_kind, None);
 
         drop(state);
         let _ = fs::remove_dir_all(&root);

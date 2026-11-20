@@ -41,7 +41,7 @@ import {
   startMediaProcessing,
 } from "./api/library";
 import { errorMessage } from "./lib/errors";
-import { sortEpisodes } from "./lib/episodes";
+import { sortEpisodes, sortExtraEpisodes } from "./lib/episodes";
 import { seriesCoverUrl } from "./lib/thumbnails";
 import { listRssSeriesBadges } from "./api/rss";
 import type {
@@ -1028,7 +1028,7 @@ function App() {
         listExtraEpisodes(target.id),
       ]);
       const sorted = sortEpisodes(mainRows);
-      const sortedExtras = sortEpisodes(extraRows);
+      const sortedExtras = sortExtraEpisodes(extraRows);
       setEpisodes(sorted);
       setExtraEpisodes(sortedExtras);
 
@@ -1130,7 +1130,7 @@ function App() {
       setSeries((items) => patchSeriesSummary(items, series));
       setSearchItems((items) => patchSeriesSummary(items, series));
       setEpisodes(sortEpisodes(mainRows));
-      setExtraEpisodes(sortEpisodes(extraRows));
+      setExtraEpisodes(sortExtraEpisodes(extraRows));
       if (extraRows.length === 0) setExtrasOpen(false);
       setRecentVersion((value) => value + 1);
     } catch (err) {
@@ -1469,9 +1469,9 @@ function App() {
         </div>
       </AppShell>
 
-      {(progress || mediaProgress) && (
+      {settings?.showProgressBars !== false && (progress || mediaProgress) && (
         <div className="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4">
-          {progress && settings?.showScanProgress !== false && (
+          {progress && (
             <div className="pointer-events-auto w-full max-w-2xl">
               <ScanBanner
                 progress={progress}
@@ -1506,8 +1506,8 @@ function App() {
                 dataRoot={settings?.dataRoot ?? null}
                 coverUrl={seriesCoverUrl(selectedSeries)}
                 onBack={closeExtras}
-                onPlay={(episode) =>
-                  openPlayer(selectedSeries, extraEpisodes, episode)
+                onPlay={(episode, list) =>
+                  openPlayer(selectedSeries, list, episode)
                 }
               />
             </div>

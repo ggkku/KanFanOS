@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -106,6 +108,8 @@ pub struct EpisodeSummary {
     pub episode_number: Option<i64>,
     /// 发布版本号（06v2 → 2），没有版本标记时为 1。
     pub episode_version: i64,
+    /// 其他视频的展示分类；正片为 `None`。
+    pub extra_kind: Option<String>,
 }
 
 const SERIES_SELECT: &str = "
@@ -688,6 +692,33 @@ impl Database {
         kind: &str,
     ) -> Result<Vec<EpisodeSummary>> {
         let conn = self.conn()?;
+
+        // 其他视频的展示分类需要番剧目录和名称，用来计算相对路径并避免
+        // 番剧名里的 SP/ED 等字样被误判。正片列表不读取这些信息。
+        let (series_path, series_name, aliases): (String, String, String) = conn
+            .query_row(
+                "SELECT path, name, aliases FROM series WHERE id = ?1",
+                [series_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let mut known_titles: Vec<String> = vec![series_name];
+        known_titles.extend(
+            aliases
+                .split('\n')
+                .map(str::trim)
+                .filter(|alias| !alias.is_empty())
+                .map(str::to_string),
+        );
+        if let Some(folder) = Path::new(&series_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+        {
+            known_titles.push(folder.to_string());
+        }
+        let known_titles: Vec<&str> =
+            known_titles.iter().map(String::as_str).collect();
+
         let mut stmt = conn.prepare(
             "SELECT v.id,
                     v.filename,
@@ -709,6 +740,17 @@ impl Database {
 
         let rows = stmt.query_map(params![series_id, kind], |row| {
             let filename: String = row.get(1)?;
+            let path: String = row.get(2)?;
+            let extra_kind = if kind == "extra" {
+                let relative = crate::series_config::relative_path(
+                    Path::new(&series_path),
+                    Path::new(&path),
+                );
+                crate::extra_names::classify(&relative, &filename, &known_titles)
+                    .map(|kind| kind.label().to_string())
+            } else {
+                None
+            };
             Ok(EpisodeSummary {
                 id: row.get(0)?,
                 episode_number: crate::episode_names::parse_episode_from_filename(&filename),
@@ -716,7 +758,7 @@ impl Database {
                     &filename,
                 ),
                 filename,
-                path: row.get(2)?,
+                path,
                 file_size: row.get(3)?,
                 duration_ms: row.get(4)?,
                 width: row.get(5)?,
@@ -724,6 +766,7 @@ impl Database {
                 thumbnail_key: row.get(7)?,
                 last_position_ms: row.get(8)?,
                 completed: row.get::<_, i64>(9)? != 0,
+                extra_kind,
             })
         })?;
 

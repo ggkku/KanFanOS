@@ -41,7 +41,7 @@ import {
   setAutoWatch,
   setPageTransition,
   setSeriesTransition,
-  setShowScanProgress,
+  setShowProgressBars,
   setThumbnailWidth,
   setWindowMode,
   startMediaProcessing,
@@ -247,12 +247,12 @@ export function SettingsPage({
     }
   };
 
-  const toggleShowScanProgress = async () => {
+  const toggleShowProgressBars = async () => {
     if (!settings) return;
     setError(null);
 
     try {
-      const next = await setShowScanProgress(!settings.showScanProgress);
+      const next = await setShowProgressBars(!settings.showProgressBars);
       onSettingsChange(next);
     } catch (err) {
       setError(errorMessage(err));
@@ -540,20 +540,20 @@ export function SettingsPage({
         <div className="flex items-center gap-4 border-b border-neutral-800/70 px-5 py-3.5">
           <Activity size={16} className="shrink-0 text-neutral-500" />
           <div className="w-20 shrink-0 text-xs text-neutral-500">
-            扫描进度条
+            后台进度条
           </div>
           <div className="min-w-0 flex-1 text-xs text-neutral-300">
-            {settings?.showScanProgress
-              ? "已开启 · 扫描时显示底部进度条"
-              : "已关闭 · 扫描时不再显示进度条"}
+            {settings?.showProgressBars
+              ? "已开启 · 显示扫描、缩略图等后台进度条"
+              : "已关闭 · 扫描、缩略图等后台进度条不再显示"}
           </div>
           <button
             type="button"
-            onClick={() => void toggleShowScanProgress()}
+            onClick={() => void toggleShowProgressBars()}
             disabled={!settings}
             className={actionButton}
           >
-            {settings?.showScanProgress ? "关闭" : "开启"}
+            {settings?.showProgressBars ? "关闭" : "开启"}
           </button>
         </div>
 

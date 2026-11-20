@@ -78,9 +78,9 @@ pub struct Settings {
     /// 是否监听目录变化并自动同步。
     #[serde(default = "default_auto_watch")]
     pub auto_watch: bool,
-    /// 扫描时是否显示底部进度条。
-    #[serde(default = "default_show_scan_progress")]
-    pub show_scan_progress: bool,
+    /// 是否显示扫描、缩略图等后台任务进度条。
+    #[serde(default = "default_show_progress_bars", alias = "showScanProgress")]
+    pub show_progress_bars: bool,
     /// 是否在 Windows 登录后自动启动。
     #[serde(default)]
     pub auto_start: bool,
@@ -105,7 +105,7 @@ fn default_auto_watch() -> bool {
     false
 }
 
-fn default_show_scan_progress() -> bool {
+fn default_show_progress_bars() -> bool {
     true
 }
 
@@ -176,7 +176,7 @@ impl Default for Settings {
         Self {
             library_root: None,
             auto_watch: default_auto_watch(),
-            show_scan_progress: default_show_scan_progress(),
+            show_progress_bars: default_show_progress_bars(),
             auto_start: false,
             thumbnail_width: default_thumbnail_width(),
             page_transition: default_page_transition(),
@@ -274,12 +274,28 @@ mod tests {
         let settings = load(&dir).unwrap();
         assert_eq!(settings.library_root.as_deref(), Some("X:\\番"));
         assert!(!settings.auto_watch);
-        assert!(settings.show_scan_progress);
+        assert!(settings.show_progress_bars);
         assert!(!settings.auto_start);
         assert_eq!(settings.thumbnail_width, 480);
         assert_eq!(settings.page_transition, PAGE_TRANSITION_SLIDE);
         assert_eq!(settings.series_transition, SERIES_TRANSITION_FLIP);
         assert_eq!(settings.window_mode, WINDOW_MODE_BORDERLESS);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_scan_progress_setting_maps_to_progress_bars() {
+        let dir = temp_dir("settings-legacy-progress");
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::write(
+            settings_file(&dir),
+            r#"{"showScanProgress":false}"#,
+        )
+        .unwrap();
+
+        let settings = load(&dir).unwrap();
+        assert!(!settings.show_progress_bars);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -294,7 +310,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -311,7 +327,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -335,7 +351,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_FLIP.to_string(),
@@ -352,7 +368,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: "bogus".to_string(),
@@ -376,7 +392,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 480,
                 page_transition: PAGE_TRANSITION_SLIDE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -393,7 +409,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 480,
                 page_transition: "unknown".to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -417,7 +433,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: false,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 5000,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),
@@ -434,7 +450,7 @@ mod tests {
                 library_root: None,
                 auto_start: false,
                 auto_watch: true,
-                show_scan_progress: true,
+                show_progress_bars: true,
                 thumbnail_width: 1,
                 page_transition: PAGE_TRANSITION_FADE.to_string(),
                 series_transition: SERIES_TRANSITION_RISE.to_string(),

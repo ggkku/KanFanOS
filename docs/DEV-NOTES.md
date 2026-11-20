@@ -224,7 +224,7 @@ MPV 通过 `--wid` 渲染到一个 Win32 子窗口，**永远在 WebView 之上*
 - 跳过写入中的文件不等于文件被删除：扫描结束前 `Database::keep_active_paths` 把这些路径从 `checking` 恢复为 `active`，下载/替换期间剧集不会在界面上短暂消失。
 - 手动「重新扫描」仍按磁盘当前状态执行（`settle = None`），不受静默期影响；但 qBittorrent 未完成文件同样会查询并隐藏，避免点一次重新扫描又把半成品加回选集。
 - **下载中的文件不进入选集**：自动同步前先查询 qBittorrent（内置实例只在已运行时查询，不顺手启动；外部 WebUI 按配置连接），用 `torrents/info` 的 `progress < 1` 找出未完成任务，再用 `torrents/files` 的逐文件进度得到真正的未完成文件路径。扫描跳过的同时调用 `Database::hide_paths` 把已有记录标记为 `missing`，选集页面立即不显示；下载完成后 `upsert_videos` 会重新置为 `active`。同一批种子里已经下好的文件不会一起隐藏。文件列表接口不可用时退回 `content_path`（整个种子目录先隐藏）。查询超时 3 秒，失败则退回静默期判断；有未完成任务时每 180 秒兜底复查一次，正常完成仍由文件事件触发。
-- 设置页新增「扫描进度条」开关（`show_scan_progress`，默认开启），关闭后 `App` 不再渲染底部 `ScanBanner`；元数据/缩略图进度条（`MediaBanner`）不受影响。
+- 设置页「后台进度条」开关（`show_progress_bars`，默认开启；旧配置里的 `showScanProgress` 通过 serde alias 继续生效），关闭后 `App` 不再渲染底部的 `ScanBanner` 和缩略图/元数据处理用的 `MediaBanner`。
 - 设置页「版本」从 `getVersion()` 读取 `tauri.conf.json` 的版本，不再硬编码（此前一直显示 1.3.4）。
 
 ## 1.3.7 内置 qBittorrent WebUI 打开下载目录与关闭残留修复

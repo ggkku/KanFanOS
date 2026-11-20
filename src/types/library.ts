@@ -24,7 +24,7 @@ export interface AppSettings {
   libraryId: number | null;
   dataRoot: string;
   autoWatch: boolean;
-  showScanProgress: boolean;
+  showProgressBars: boolean;
   autoStart: boolean;
   thumbnailWidth: number;
   pageTransition: PageTransition;
@@ -161,6 +161,8 @@ export interface EpisodeSummary {
   episodeNumber: number | null;
   /// 发布版本号（06v2 → 2），没有版本标记时为 1。
   episodeVersion: number;
+  /// 其他视频的展示分类；正片为 null。
+  extraKind: string | null;
 }
 
 export interface DuplicateEpisode {
